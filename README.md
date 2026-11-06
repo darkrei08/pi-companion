@@ -52,6 +52,11 @@ Resolution order, first hit wins:
 3. the `model:` line of `roles/companion.md`
 4. `cliproxyapi/gemini-3.8-flash-high:medium`
 
+Automatic pane opening is on by default. Set `~/.pi/agent/companion/settings.json` to
+`{"autoOpen": false}` or run `/companion auto off` to disable it; `/companion auto on`
+re-enables it. Auto-open runs only for interactive TUI sessions inside Herdr, never for
+RPC, print, JSON, delegated child, workflow child, or companion sessions.
+
 ## Commands
 
 | Command | What it does |
@@ -61,6 +66,7 @@ Resolution order, first hit wins:
 | `/companion status` | Model, effort, which source it came from, transcript path, entries, bytes, project key |
 | `/companion model <alias\|provider/model[:effort]>` | Validate a model and pin it for this project |
 | `/companion reset` | Archive the current transcript and start clean |
+| `/companion auto on\|off` | Enable or disable automatic companion pane opening |
 
 ### `/companion open`
 
@@ -68,7 +74,7 @@ Resolution order, first hit wins:
 /companion open
 ```
 
-Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, `--tools read,grep,find,ls`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down.
+Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, `--tools read,grep,find,ls`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down. A `session_start` handler performs the same open path automatically for eligible sessions, and the launcher sets `PI_COMPANION_SESSION=1` so the companion cannot recursively open another pane.
 
 Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
 
@@ -83,7 +89,8 @@ Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` com
 ```
 ~/.pi/agent/companion/<project-key>/
 ├── session.jsonl   # the tutor transcript, one per project root
-└── meta.json       # the model pinned for this project
+├── meta.json       # the model pinned for this project
+└── launcher.sh     # reusable pane launcher, including the recursion guard
 ```
 
 `<project-key>` is the first 16 hex characters of the SHA-256 of the resolved project root, so two clones of the same repo do not share a tutor.
@@ -91,7 +98,7 @@ Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` com
 ## Verification
 
 ```sh
-node --test tests/*.test.mjs   # 24 tests, no network, no Pi runtime
+node --test tests/*.test.mjs   # decision matrix, marker guard, and pane helpers
 npm run typecheck              # needs typescript, declared as a devDependency
 ```
 

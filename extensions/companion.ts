@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  accessSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -8,6 +10,7 @@ import {
   renameSync,
   statSync,
   writeFileSync,
+  X_OK,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -20,8 +23,10 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 export const COMPANION_MESSAGE_TYPE = "companion";
+export const COMPANION_MARKER = "PI_COMPANION_SESSION";
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
+const AUTO_OPEN_ENTRY = "companion_auto_opened";
 
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -34,6 +39,7 @@ export const USAGE = [
   "/companion status                                show model, effort, transcript size and project key",
   "/companion model <alias|provider/model[:effort]> set this project's model",
   "/companion reset                                 archive the transcript and start a fresh one",
+  "/companion auto on|off                          enable or disable automatic pane opening",
 ].join("\n");
 
 export type ModelSource = "meta" | "setting" | "role" | "fallback";
@@ -47,6 +53,7 @@ export type ParsedCommand =
   | { kind: "open" }
   | { kind: "status" }
   | { kind: "reset" }
+  | { kind: "auto"; value: boolean }
   | { kind: "model"; value: string }
   | { kind: "question"; question: string };
 
@@ -59,6 +66,9 @@ export function parseCompanionArgs(args: string): ParsedCommand {
   if (text === "open") return { kind: "open" };
   if (text === "status") return { kind: "status" };
   if (text === "reset") return { kind: "reset" };
+  if (text === "auto on") return { kind: "auto", value: true };
+  if (text === "auto off") return { kind: "auto", value: false };
+  if (text === "auto") return { kind: "usage" };
   if (text === "model") return { kind: "usage" };
   if (text.startsWith("model ")) {
     const value = text.slice("model ".length).trim();
@@ -170,10 +180,18 @@ export function readAliasMap(agentDir: string): Record<string, string> {
   return mergeAliasMaps(roles, workflows);
 }
 
-// Optional global default for this extension: <agentDir>/companion/settings.json {"model": "alias|provider/model[:effort]"}
+function companionSettingsPath(agentDir: string): string {
+  return join(agentDir, "companion", "settings.json");
+}
+
+// Optional global defaults: <agentDir>/companion/settings.json {"model": "...", "autoOpen": false}
 export function readExtensionModel(agentDir: string): string | undefined {
-  const model = readJsonObject(join(agentDir, "companion", "settings.json"))?.model;
+  const model = readJsonObject(companionSettingsPath(agentDir))?.model;
   return typeof model === "string" && model.trim() ? model : undefined;
+}
+
+export function readAutoOpenSetting(agentDir: string): boolean {
+  return readJsonObject(companionSettingsPath(agentDir))?.autoOpen !== false;
 }
 
 export function parseRole(markdown: string): { model?: string; body: string } {
@@ -201,12 +219,19 @@ export type CompanionPaths = {
   dir: string;
   sessionPath: string;
   metaPath: string;
+  launcherPath: string;
 };
 
 export function companionPaths(agentDir: string, root: string): CompanionPaths {
   const key = projectKey(root);
   const dir = join(agentDir, "companion", key);
-  return { key, dir, sessionPath: join(dir, "session.jsonl"), metaPath: join(dir, "meta.json") };
+  return {
+    key,
+    dir,
+    sessionPath: join(dir, "session.jsonl"),
+    metaPath: join(dir, "meta.json"),
+    launcherPath: join(dir, "launcher.sh"),
+  };
 }
 
 export type PaneAvailability = { ok: true } | { ok: false; reason: string };
@@ -219,6 +244,23 @@ export function paneAvailability(herdrEnv: string | undefined, herdrFound: boole
   return { ok: true };
 }
 
+export type AutoOpenDecision = { open: true; reason: "eligible" } | { open: false; reason: string };
+
+export function autoOpenDecision(
+  hasUI: boolean,
+  herdrAvailable: boolean,
+  alreadyOpened: boolean,
+  autoOpenSetting: boolean,
+  companionMarker: boolean,
+): AutoOpenDecision {
+  if (!hasUI) return { open: false, reason: "not interactive" };
+  if (companionMarker) return { open: false, reason: "companion marker present" };
+  if (alreadyOpened) return { open: false, reason: "already opened" };
+  if (!autoOpenSetting) return { open: false, reason: "auto-open disabled" };
+  if (!herdrAvailable) return { open: false, reason: "Herdr unavailable" };
+  return { open: true, reason: "eligible" };
+}
+
 // A wide pane splits right; a narrow or tall one splits down, never squeezing an unusable column.
 export function splitDirection(size: { width: number; height: number }): "right" | "down" {
   return size.width > size.height ? "right" : "down";
@@ -228,26 +270,23 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-// --append-system-prompt accepts inline text or a file path; the role body is passed inline.
-// shortcut: the body rides inline (2.8 KB here); macOS rejects pane commands over the shell's
-// canonical line limit (about 1 KB), so write the body to a file and pass that path when macOS matters.
-export function buildCompanionPaneCommand(input: {
+export function buildCompanionPaneCommand(launcherPath: string): string {
+  return shellQuote(launcherPath);
+}
+
+export function buildCompanionPaneScript(input: {
+  piPath: string;
   provider: string;
   model: string;
   effort: Effort;
   roleBody: string;
 }): string {
   return [
-    "pi",
-    "--name",
-    "companion",
-    "--model",
-    `${input.provider}/${input.model}:${input.effort}`,
-    "--tools",
-    READ_ONLY_TOOLS.join(","),
-    "--append-system-prompt",
-    shellQuote(input.roleBody),
-  ].join(" ");
+    "#!/bin/sh",
+    `export ${COMPANION_MARKER}=1`,
+    `exec ${shellQuote(input.piPath)} \\\n  --name ${shellQuote("companion")} \\\n  --model ${shellQuote(`${input.provider}/${input.model}:${input.effort}`)} \\\n  --tools ${shellQuote(READ_ONLY_TOOLS.join(","))} \\\n  --append-system-prompt ${shellQuote(input.roleBody)}`,
+    "",
+  ].join("\n");
 }
 
 export function manualPaneInstructions(command: string, reason: string): string {
@@ -287,7 +326,27 @@ function ensureMeta(paths: CompanionPaths, root: string): CompanionMeta {
 
 function extensionAgentDir(): string {
   const configured = process.env.PI_CODING_AGENT_DIR?.trim();
-  return configured ? configured : join(homedir(), ".pi", "agent");
+  return configured ? resolve(configured) : join(homedir(), ".pi", "agent");
+}
+
+function resolvePiExecutable(): string {
+  for (const entry of (process.env.PATH ?? "").split(":")) {
+    const candidate = resolve(entry || ".", "pi");
+    try {
+      accessSync(candidate, X_OK);
+      return realpathSync(candidate);
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  throw new Error("Cannot find pi executable on PATH");
+}
+
+function writeCompanionPaneScript(paths: CompanionPaths, content: string): void {
+  mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
+  chmodSync(paths.dir, 0o700);
+  writeFileSync(paths.launcherPath, content, { encoding: "utf8", mode: 0o700 });
+  chmodSync(paths.launcherPath, 0o700);
 }
 
 function companionRolePath(): string {
@@ -477,13 +536,20 @@ function loadCompanionState(ctx: ExtensionCommandContext): CompanionState {
 }
 
 async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  if (process.env[COMPANION_MARKER] === "1") throw new Error("current session is already the companion");
+
   const state = loadCompanionState(ctx);
-  const command = buildCompanionPaneCommand({
-    provider: state.provider,
-    model: state.model,
-    effort: state.effort,
-    roleBody: state.roleBody,
-  });
+  writeCompanionPaneScript(
+    state.paths,
+    buildCompanionPaneScript({
+      piPath: resolvePiExecutable(),
+      provider: state.provider,
+      model: state.model,
+      effort: state.effort,
+      roleBody: state.roleBody,
+    }),
+  );
+  const command = buildCompanionPaneCommand(state.paths.launcherPath);
 
   const herdrFound = (await exec("herdr", ["--version"])).code === 0;
   const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
@@ -521,7 +587,8 @@ async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext)
       `pane ${paneId} created but pi did not start: ${errorLine(run.stderr || run.stdout || "no response")}`,
     );
   }
-  post(pi, ctx, `companion opened in pane ${paneId}`);
+  pi.appendEntry(AUTO_OPEN_ENTRY, { paneId });
+  post(pi, ctx, `companion opened in pane ${paneId}\nlauncher: ${state.paths.launcherPath}`);
 }
 
 async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -603,6 +670,14 @@ function setCompanionModel(pi: ExtensionAPI, ctx: ExtensionCommandContext, value
   );
 }
 
+function setCompanionAutoOpen(pi: ExtensionAPI, ctx: ExtensionCommandContext, enabled: boolean): void {
+  const path = companionSettingsPath(extensionAgentDir());
+  const settings = readJsonObject(path) ?? {};
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ ...settings, autoOpen: enabled }, null, 2)}\n`, "utf8");
+  post(pi, ctx, `companion auto-open: ${enabled ? "on" : "off"}`);
+}
+
 function resetCompanion(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   const agentDir = extensionAgentDir();
   const root = resolveProjectRoot(ctx.cwd);
@@ -637,6 +712,9 @@ async function handleCompanion(
       case "reset":
         resetCompanion(pi, ctx);
         return;
+      case "auto":
+        setCompanionAutoOpen(pi, ctx, parsed.value);
+        return;
       case "question":
         await askCompanion(pi, ctx, parsed.question);
         return;
@@ -650,8 +728,40 @@ async function handleCompanion(
 }
 
 export default function companionExtension(pi: ExtensionAPI): void {
+  let autoOpenAttempted = false;
+
+  pi.on("session_start", async (_event, ctx) => {
+    const interactive =
+      ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
+    const companionMarker = process.env[COMPANION_MARKER] === "1";
+    const agentDir = extensionAgentDir();
+    const alreadyOpened = autoOpenAttempted || ctx.sessionManager.getEntries().some(
+      (entry) => entry.type === "custom" && entry.customType === AUTO_OPEN_ENTRY,
+    );
+    const autoOpenSetting = readAutoOpenSetting(agentDir);
+
+    if (!interactive || companionMarker || alreadyOpened || !autoOpenSetting) return;
+
+    const herdrFound = (await exec("herdr", ["--version"])).code === 0;
+    const decision = autoOpenDecision(
+      interactive,
+      paneAvailability(process.env.HERDR_ENV, herdrFound).ok,
+      alreadyOpened,
+      autoOpenSetting,
+      companionMarker,
+    );
+    if (!decision.open) return;
+
+    autoOpenAttempted = true;
+    try {
+      await openCompanionPane(pi, ctx);
+    } catch (error) {
+      post(pi, ctx, `companion: auto-open failed: ${errorLine(error)}`);
+    }
+  });
+
   pi.registerCommand("companion", {
-    description: "Read-only tutor chat for this project: ask, open, status, model, reset.",
+    description: "Read-only tutor chat for this project: ask, open, status, model, reset, auto.",
     handler: async (args, ctx) => handleCompanion(pi, ctx, args),
   });
 }
