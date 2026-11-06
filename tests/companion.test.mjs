@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   archiveSessionPath,
+  autoOpenDecision,
   buildCompanionPaneCommand,
+  buildCompanionPaneScript,
   companionPaths,
   FALLBACK_MODEL,
   manualPaneInstructions,
@@ -14,6 +17,7 @@ import {
   paneAvailability,
   parseCompanionArgs,
   parseRole,
+  readAutoOpenSetting,
   projectKey,
   readAliasMap,
   resolveCompanionModel,
@@ -36,6 +40,7 @@ test("companionPaths nests the project under the agent dir key", () => {
   assert.equal(paths.dir, join("/agent", "companion", "f630ad93b344dd6b"));
   assert.equal(paths.sessionPath, join(paths.dir, "session.jsonl"));
   assert.equal(paths.metaPath, join(paths.dir, "meta.json"));
+  assert.equal(paths.launcherPath, join(paths.dir, "launcher.sh"));
 });
 
 test("mergeAliasMaps keeps the first file's value on conflict", () => {
@@ -171,6 +176,9 @@ test("parseCompanionArgs maps every documented form", () => {
   assert.deepEqual(parseCompanionArgs("status"), { kind: "status" });
   assert.deepEqual(parseCompanionArgs("open"), { kind: "open" });
   assert.deepEqual(parseCompanionArgs("reset"), { kind: "reset" });
+  assert.deepEqual(parseCompanionArgs("auto on"), { kind: "auto", value: true });
+  assert.deepEqual(parseCompanionArgs("auto off"), { kind: "auto", value: false });
+  assert.deepEqual(parseCompanionArgs("auto"), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("model"), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("model companion-model"), {
     kind: "model",
@@ -211,28 +219,22 @@ test("parseRole reads the model alias and keeps the body", () => {
 });
 
 const PANE_INPUT = {
+  piPath: "/usr/local/bin/pi",
   provider: "cliproxyapi",
   model: "gemini-3.8-flash-high",
   effort: "medium",
   roleBody: "You are the companion chat.",
 };
 
-test("buildCompanionPaneCommand emits the exact pi flags in a fixed order", () => {
-  assert.equal(
-    buildCompanionPaneCommand(PANE_INPUT),
-    "pi --name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls --append-system-prompt 'You are the companion chat.'",
-  );
+test("buildCompanionPaneCommand runs the stable absolute launcher path", () => {
+  assert.equal(buildCompanionPaneCommand("/state/companion/key/launcher.sh"), "'/state/companion/key/launcher.sh'");
 });
 
-test("buildCompanionPaneCommand does not depend on the order of its input keys", () => {
-  const reordered = {
-    roleBody: PANE_INPUT.roleBody,
-    effort: PANE_INPUT.effort,
-    model: PANE_INPUT.model,
-    provider: PANE_INPUT.provider,
-  };
-  assert.equal(buildCompanionPaneCommand(reordered), buildCompanionPaneCommand(PANE_INPUT));
-  assert.equal(buildCompanionPaneCommand(PANE_INPUT), buildCompanionPaneCommand(PANE_INPUT));
+test("buildCompanionPaneScript marks the launched session as a companion", () => {
+  assert.equal(
+    buildCompanionPaneScript(PANE_INPUT),
+    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls' \\\n  --append-system-prompt 'You are the companion chat.'\n",
+  );
 });
 
 test("shellQuote keeps the role body a single shell argument, apostrophes included", () => {
@@ -240,14 +242,45 @@ test("shellQuote keeps the role body a single shell argument, apostrophes includ
   assert.equal(shellQuote("two\nlines"), "'two\nlines'");
 });
 
-test("buildCompanionPaneCommand quotes a multi-line role body as one argument", () => {
-  const body = "Line one\nIt's the human's model";
-  const command = buildCompanionPaneCommand({ ...PANE_INPUT, roleBody: body });
-  assert.equal(
-    command.slice(command.indexOf("--append-system-prompt")),
-    `--append-system-prompt ${shellQuote(body)}`,
-  );
-  assert.equal(command.split("\n").length, body.split("\n").length);
+test("the launcher round-trips a hostile body through POSIX sh", () => {
+  const dir = mkdtempSync(join(tmpdir(), "companion-launcher-"));
+  const launcher = join(dir, "launcher.sh");
+  const body = "single ' double \" backslash \\\\ $dollar `backtick`\nline two";
+  try {
+    writeFileSync(launcher, buildCompanionPaneScript({ ...PANE_INPUT, piPath: "/bin/echo", roleBody: body }), {
+      mode: 0o700,
+    });
+    execFileSync("sh", ["-n", launcher]);
+    const output = execFileSync(launcher, { encoding: "utf8" });
+    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls --append-system-prompt"));
+    assert.ok(output.endsWith(`${body}\n`));
+    assert.equal(statSync(launcher).mode & 0o777, 0o700);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readAutoOpenSetting defaults to on and respects an explicit false", () => {
+  const dir = mkdtempSync(join(tmpdir(), "companion-auto-setting-"));
+  try {
+    assert.equal(readAutoOpenSetting(dir), true);
+    mkdirSync(join(dir, "companion"));
+    writeFileSync(join(dir, "companion", "settings.json"), JSON.stringify({ autoOpen: false }));
+    assert.equal(readAutoOpenSetting(dir), false);
+    writeFileSync(join(dir, "companion", "settings.json"), JSON.stringify({ autoOpen: true }));
+    assert.equal(readAutoOpenSetting(dir), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("autoOpenDecision covers the interactive Herdr matrix and companion marker guard", () => {
+  assert.deepEqual(autoOpenDecision(true, true, false, true, false), { open: true, reason: "eligible" });
+  assert.deepEqual(autoOpenDecision(false, true, false, true, false), { open: false, reason: "not interactive" });
+  assert.deepEqual(autoOpenDecision(true, false, false, true, false), { open: false, reason: "Herdr unavailable" });
+  assert.deepEqual(autoOpenDecision(true, true, true, true, false), { open: false, reason: "already opened" });
+  assert.deepEqual(autoOpenDecision(true, true, false, false, false), { open: false, reason: "auto-open disabled" });
+  assert.deepEqual(autoOpenDecision(true, true, false, true, true), { open: false, reason: "companion marker present" });
 });
 
 test("paneAvailability states exactly why the pane cannot open", () => {

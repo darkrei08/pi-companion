@@ -43,9 +43,21 @@ S13. The interface and the feature set improve from evidence, not from taste: "p
 | T5 | Publish: public GitHub repo, install instructions, verification transcript | inline | S7 | github.com/darkrei08/pi-companion |
 | T6 | `/companion open`: Herdr split plus interactive read-only Pi session from the same role and model resolution | builder | S10 | 5c74b99 |
 | T7 | Publish to npm, install from the registry, PRs to pi-companion and pi-ext-roles | inline | S7 | pi-companion@0.1.0 |
-| T8 | Launcher script instead of an inline prompt body, so pane mode is not length-limited on macOS | builder | S11 | pending |
-| T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | pending |
-| T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | pending |
+| T8 | Launcher script instead of an inline prompt body, so pane mode is not length-limited on macOS | builder | S11 | this branch |
+| T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | this branch |
+| T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | this branch |
+
+## Research: what to steal from the field (S13)
+
+Ranked by value against what Pi can support today. Sources as reported by the researcher; the two most load-bearing ones were re-checked, the rest were not.
+
+1. **Asymmetric model routing with the working chat's context.** The best explanation engine here is not a second cold agent but a cheap model answering against a pruned view of the working conversation. Pi already exposes the branch and a non-agent completion path.
+2. **A real pane, never a modal overlay.** Confirmed by prior art: Claude Code's side questions are an ephemeral overlay, `pi-better-btw-plus` puts a side chat in `ctx.ui.custom`, and both hide the streaming work underneath. The pane is the only presentation that lets you read while the agent writes.
+3. **Diff and symbol anchoring.** Grounding a question in `git diff` or in the symbol under the cursor removes the copy-paste step that makes people stop asking.
+4. **Promotion hatch.** One keystroke that turns an explanation into a directive in the working chat's editor is the cheapest way to close the loop the video cares about.
+5. **Read-only enforcement by construction.** Already done here through the tool allowlist; the field agrees that giving a side chat write access to the same worktree is the failure mode to avoid.
+
+Recorded as future work, not implemented: items 1, 3 and 4 need their own spec, and item 1 changes the cost model enough to deserve a measurement first.
 
 ## Log
 
@@ -64,3 +76,5 @@ L6. Distribution facts: the npm package is `pi-companion@0.1.0`, installed with 
 L7. Operator request (verbatim): "E esegui il push del pull request rispetto ai commit che abbiamo emergiato nei nostri fork e che sono appunto poi correttamente installati e funzionanti su questo host, dopodiché, procedi a sviluppare e a correggere i fix che hai individuato, ad esempio, per Mac OS o per Linux, e dopodiché, prova anche online a ricercare con la mia suite data search se esiste qualcosa per migliorare il companion sia graficamente che con interfaccia e sia in funzionalità e soprattutto quando si avvia una nuova sessione agents allora ci deve essere sempre a fianco una sessione companion quindi questa è una direttiva da implementare esegui lo sviluppo di queste ultime delle ricerche attraverso Workflow Extensible."
 
 L8. Both earlier PRs are merged on main (pi-companion#1 squash-merged as 1915010, pi-ext-roles#1 as 81180b1) and the host runs the npm build, so the starting point for this round is merged main, not a branch.
+
+L9. Round two shipped on the branch that this document describes: the launcher script removes the macOS command-length limit, and `session_start` now auto-opens the companion with a marker guard against recursion, an `alreadyOpened` guard, a `ctx.hasUI` check and an `autoOpen` setting. The research in the section above comes from the operator's local data stack (Firecrawl on loopback) plus general web search.
