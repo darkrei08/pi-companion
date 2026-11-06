@@ -28,11 +28,11 @@ S9. Cheap by default and never silent about cost drift: the current model, effor
 
 | ID | What | Route | Spec | Commit |
 |---|---|---|---|---|
-| T1 | Repo skeleton, package manifest, role file with the tutor contract, LICENSE, README | inline | S7 S8 | pending |
-| T2 | Extension: `/companion <question>` on a persistent read-only session, project-keyed history | builder | S1 S4 S6 | pending |
-| T3 | Model and effort resolution through alias + role, `/companion status` and `/companion model` | builder | S3 S9 | pending |
-| T4 | `pi -e` smoke and unit tests for the pure parts | builder | S6 | pending |
-| T5 | Publish: public GitHub repo, install instructions, verification transcript | inline | S7 | pending |
+| T1 | Repo skeleton, package manifest, role file with the tutor contract, LICENSE, README | inline | S7 S8 | f5de4a8 |
+| T2 | Extension: `/companion <question>` on a persistent read-only session, project-keyed history | builder | S1 S4 S6 | f5de4a8 |
+| T3 | Model and effort resolution through alias + role, `/companion status` and `/companion model` | builder | S3 S9 | f5de4a8 |
+| T4 | `pi -e` smoke and unit tests for the pure parts | builder | S6 | f5de4a8 |
+| T5 | Publish: public GitHub repo, install instructions, verification transcript | inline | S7 | github.com/darkrei08/pi-companion |
 
 ## Log
 
