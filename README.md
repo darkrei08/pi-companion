@@ -13,6 +13,12 @@ This is the trick Salvatore Sanfilippo describes in [Un trucco per evitare di no
 ## Install
 
 ```sh
+pi install npm:pi-companion
+```
+
+Or straight from the repository:
+
+```sh
 pi install git:github.com/darkrei08/pi-companion
 ```
 
@@ -51,9 +57,20 @@ Resolution order, first hit wins:
 | Command | What it does |
 |---|---|
 | `/companion <question>` | Ask the tutor and post its answer into the transcript |
+| `/companion open` | Start the tutor as a real Pi session in a pane beside this one |
 | `/companion status` | Model, effort, which source it came from, transcript path, entries, bytes, project key |
 | `/companion model <alias\|provider/model[:effort]>` | Validate a model and pin it for this project |
 | `/companion reset` | Archive the current transcript and start clean |
+
+### `/companion open`
+
+```sh
+/companion open
+```
+
+Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, `--tools read,grep,find,ls`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down.
+
+Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
 
 ## What it deliberately does not do
 
@@ -74,7 +91,7 @@ Resolution order, first hit wins:
 ## Verification
 
 ```sh
-node --test tests/*.test.mjs   # 17 tests, no network, no Pi runtime
+node --test tests/*.test.mjs   # 24 tests, no network, no Pi runtime
 npm run typecheck              # needs typescript, declared as a devDependency
 ```
 

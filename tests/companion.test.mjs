@@ -6,15 +6,20 @@ import test from "node:test";
 
 import {
   archiveSessionPath,
+  buildCompanionPaneCommand,
   companionPaths,
   FALLBACK_MODEL,
+  manualPaneInstructions,
   mergeAliasMaps,
+  paneAvailability,
   parseCompanionArgs,
   parseRole,
   projectKey,
   readAliasMap,
   resolveCompanionModel,
   resolveModelRef,
+  shellQuote,
+  splitDirection,
 } from "../extensions/companion.ts";
 
 const ALIASES = { "companion-model": "cliproxyapi/gemini-3.8-flash-high:medium" };
@@ -164,6 +169,7 @@ test("parseCompanionArgs maps every documented form", () => {
   assert.deepEqual(parseCompanionArgs(""), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("   "), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("status"), { kind: "status" });
+  assert.deepEqual(parseCompanionArgs("open"), { kind: "open" });
   assert.deepEqual(parseCompanionArgs("reset"), { kind: "reset" });
   assert.deepEqual(parseCompanionArgs("model"), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("model companion-model"), {
@@ -202,4 +208,63 @@ test("parseRole reads the model alias and keeps the body", () => {
   const plain = parseRole("No frontmatter\n");
   assert.equal(plain.model, undefined);
   assert.equal(plain.body, "No frontmatter");
+});
+
+const PANE_INPUT = {
+  provider: "cliproxyapi",
+  model: "gemini-3.8-flash-high",
+  effort: "medium",
+  roleBody: "You are the companion chat.",
+};
+
+test("buildCompanionPaneCommand emits the exact pi flags in a fixed order", () => {
+  assert.equal(
+    buildCompanionPaneCommand(PANE_INPUT),
+    "pi --name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls --append-system-prompt 'You are the companion chat.'",
+  );
+});
+
+test("buildCompanionPaneCommand does not depend on the order of its input keys", () => {
+  const reordered = {
+    roleBody: PANE_INPUT.roleBody,
+    effort: PANE_INPUT.effort,
+    model: PANE_INPUT.model,
+    provider: PANE_INPUT.provider,
+  };
+  assert.equal(buildCompanionPaneCommand(reordered), buildCompanionPaneCommand(PANE_INPUT));
+  assert.equal(buildCompanionPaneCommand(PANE_INPUT), buildCompanionPaneCommand(PANE_INPUT));
+});
+
+test("shellQuote keeps the role body a single shell argument, apostrophes included", () => {
+  assert.equal(shellQuote("It's fine"), "'It'\\''s fine'");
+  assert.equal(shellQuote("two\nlines"), "'two\nlines'");
+});
+
+test("buildCompanionPaneCommand quotes a multi-line role body as one argument", () => {
+  const body = "Line one\nIt's the human's model";
+  const command = buildCompanionPaneCommand({ ...PANE_INPUT, roleBody: body });
+  assert.equal(
+    command.slice(command.indexOf("--append-system-prompt")),
+    `--append-system-prompt ${shellQuote(body)}`,
+  );
+  assert.equal(command.split("\n").length, body.split("\n").length);
+});
+
+test("paneAvailability states exactly why the pane cannot open", () => {
+  assert.deepEqual(paneAvailability("1", true), { ok: true });
+  assert.match(paneAvailability(undefined, true).reason ?? "", /HERDR_ENV is not set/);
+  assert.match(paneAvailability("1", false).reason ?? "", /herdr binary is not on PATH/);
+});
+
+test("manualPaneInstructions prints the reason and the exact command to run by hand", () => {
+  assert.equal(
+    manualPaneInstructions("pi --name companion", "the herdr binary is not on PATH"),
+    "companion: pane not opened: the herdr binary is not on PATH\nrun it by hand:\npi --name companion",
+  );
+});
+
+test("splitDirection splits a wide pane right and a tall or square one down", () => {
+  assert.equal(splitDirection({ width: 120, height: 40 }), "right");
+  assert.equal(splitDirection({ width: 60, height: 100 }), "down");
+  assert.equal(splitDirection({ width: 40, height: 40 }), "down");
 });

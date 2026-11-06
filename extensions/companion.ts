@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -29,6 +30,7 @@ const DEFAULT_EFFORT: Effort = "medium";
 export const USAGE = [
   "companion usage",
   "/companion <question>                            ask the read-only tutor about this project",
+  "/companion open                                  open the tutor as a Pi session in a pane beside this one",
   "/companion status                                show model, effort, transcript size and project key",
   "/companion model <alias|provider/model[:effort]> set this project's model",
   "/companion reset                                 archive the transcript and start a fresh one",
@@ -42,6 +44,7 @@ export type ResolvedModel =
 
 export type ParsedCommand =
   | { kind: "usage" }
+  | { kind: "open" }
   | { kind: "status" }
   | { kind: "reset" }
   | { kind: "model"; value: string }
@@ -53,6 +56,7 @@ export type CompanionMeta = { model?: string; cwd: string; created: string };
 export function parseCompanionArgs(args: string): ParsedCommand {
   const text = args.trim();
   if (!text) return { kind: "usage" };
+  if (text === "open") return { kind: "open" };
   if (text === "status") return { kind: "status" };
   if (text === "reset") return { kind: "reset" };
   if (text === "model") return { kind: "usage" };
@@ -205,6 +209,51 @@ export function companionPaths(agentDir: string, root: string): CompanionPaths {
   return { key, dir, sessionPath: join(dir, "session.jsonl"), metaPath: join(dir, "meta.json") };
 }
 
+export type PaneAvailability = { ok: true } | { ok: false; reason: string };
+
+export function paneAvailability(herdrEnv: string | undefined, herdrFound: boolean): PaneAvailability {
+  if (herdrEnv !== "1") {
+    return { ok: false, reason: "HERDR_ENV is not set, so this session is not running inside Herdr" };
+  }
+  if (!herdrFound) return { ok: false, reason: "the herdr binary is not on PATH" };
+  return { ok: true };
+}
+
+// A wide pane splits right; a narrow or tall one splits down, never squeezing an unusable column.
+export function splitDirection(size: { width: number; height: number }): "right" | "down" {
+  return size.width > size.height ? "right" : "down";
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+// --append-system-prompt accepts inline text or a file path; the role body is passed inline.
+// shortcut: the body rides inline (2.8 KB here); macOS rejects pane commands over the shell's
+// canonical line limit (about 1 KB), so write the body to a file and pass that path when macOS matters.
+export function buildCompanionPaneCommand(input: {
+  provider: string;
+  model: string;
+  effort: Effort;
+  roleBody: string;
+}): string {
+  return [
+    "pi",
+    "--name",
+    "companion",
+    "--model",
+    `${input.provider}/${input.model}:${input.effort}`,
+    "--tools",
+    READ_ONLY_TOOLS.join(","),
+    "--append-system-prompt",
+    shellQuote(input.roleBody),
+  ].join(" ");
+}
+
+export function manualPaneInstructions(command: string, reason: string): string {
+  return `companion: pane not opened: ${reason}\nrun it by hand:\n${command}`;
+}
+
 export function archiveSessionPath(sessionPath: string, now: Date): string {
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   return sessionPath.endsWith(".jsonl")
@@ -248,6 +297,34 @@ function companionRolePath(): string {
 function errorLine(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.split("\n")[0].trim() || "Unknown error";
+}
+
+type ExecResult = { code: number; stdout: string; stderr: string };
+
+function exec(file: string, args: string[]): Promise<ExecResult> {
+  return new Promise((done) => {
+    execFile(file, args, { maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
+      done({ code, stdout, stderr });
+    });
+  });
+}
+
+function parseJsonText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function jsonField(value: unknown, ...path: string[]): unknown {
+  let current = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
 }
 
 function post(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string): void {
@@ -359,6 +436,94 @@ function readRoleFile(path: string): { model?: string; body: string } {
   }
 }
 
+type CompanionState = {
+  root: string;
+  agentDir: string;
+  paths: CompanionPaths;
+  rolePath: string;
+  roleBody: string;
+  provider: string;
+  model: string;
+  effort: Effort;
+};
+
+function loadCompanionState(ctx: ExtensionCommandContext): CompanionState {
+  const agentDir = extensionAgentDir();
+  const root = resolveProjectRoot(ctx.cwd);
+  const paths = companionPaths(agentDir, root);
+  const rolePath = companionRolePath();
+  const role = readRoleFile(rolePath);
+  if (!role.body) throw new Error(`Role file is empty: ${rolePath}`);
+
+  const meta = ensureMeta(paths, root);
+  const resolved = resolveCompanionModel({
+    metaModel: meta.model,
+    extensionModel: readExtensionModel(agentDir),
+    roleModel: role.model,
+    aliases: readAliasMap(agentDir),
+  });
+  if (!resolved.ok) throw new Error(resolved.error);
+
+  return {
+    root,
+    agentDir,
+    paths,
+    rolePath,
+    roleBody: role.body,
+    provider: resolved.provider,
+    model: resolved.model,
+    effort: resolved.effort,
+  };
+}
+
+async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const state = loadCompanionState(ctx);
+  const command = buildCompanionPaneCommand({
+    provider: state.provider,
+    model: state.model,
+    effort: state.effort,
+    roleBody: state.roleBody,
+  });
+
+  const herdrFound = (await exec("herdr", ["--version"])).code === 0;
+  const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
+  if (!availability.ok) {
+    post(pi, ctx, manualPaneInstructions(command, availability.reason));
+    return;
+  }
+
+  const layout = parseJsonText((await exec("herdr", ["pane", "layout", "--current"])).stdout);
+  const width = jsonField(layout, "result", "layout", "area", "width");
+  const height = jsonField(layout, "result", "layout", "area", "height");
+  const direction =
+    typeof width === "number" && typeof height === "number"
+      ? splitDirection({ width, height })
+      : "right";
+
+  const split = await exec("herdr", [
+    "pane",
+    "split",
+    "--current",
+    "--direction",
+    direction,
+    "--cwd",
+    state.root,
+    "--no-focus",
+  ]);
+  const paneId = jsonField(parseJsonText(split.stdout), "result", "pane", "pane_id");
+  if (split.code !== 0 || typeof paneId !== "string" || !paneId) {
+    throw new Error(`herdr pane split failed: ${errorLine(split.stderr || split.stdout || "no response")}`);
+  }
+
+  const run = await exec("herdr", ["pane", "run", paneId, command]);
+  if (run.code !== 0) {
+    throw new Error(
+      `pane ${paneId} created but pi did not start: ${errorLine(run.stderr || run.stdout || "no response")}`,
+    );
+  }
+  post(pi, ctx, `companion opened in pane ${paneId}`);
+}
+
 async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   const agentDir = extensionAgentDir();
   const root = resolveProjectRoot(ctx.cwd);
@@ -377,6 +542,8 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   }
 
   const entries = await countTranscriptEntries(paths.sessionPath, root);
+  const herdrFound = (await exec("herdr", ["--version"])).code === 0;
+  const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
   post(
     pi,
     ctx,
@@ -385,6 +552,7 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
       `model: ${resolved.provider}/${resolved.model}`,
       `effort: ${resolved.effort}`,
       `model source: ${resolved.source}${resolved.alias ? ` (alias ${resolved.alias})` : ""}`,
+      `pane mode: ${availability.ok ? "available" : `unavailable (${availability.reason})`}`,
       `transcript: ${paths.sessionPath}`,
       `transcript entries: ${entries}`,
       `transcript bytes: ${fileBytes(paths.sessionPath)}`,
@@ -395,33 +563,19 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 }
 
 async function askCompanion(pi: ExtensionAPI, ctx: ExtensionCommandContext, question: string): Promise<void> {
-  const agentDir = extensionAgentDir();
-  const root = resolveProjectRoot(ctx.cwd);
-  const paths = companionPaths(agentDir, root);
-  const rolePath = companionRolePath();
-  const role = readRoleFile(rolePath);
-  if (!role.body) throw new Error(`Role file is empty: ${rolePath}`);
-
-  const meta = ensureMeta(paths, root);
-  const resolved = resolveCompanionModel({
-    metaModel: meta.model,
-    extensionModel: readExtensionModel(agentDir),
-    roleModel: role.model,
-    aliases: readAliasMap(agentDir),
-  });
-  if (!resolved.ok) throw new Error(resolved.error);
+  const state = loadCompanionState(ctx);
 
   if (ctx.hasUI) ctx.ui.setStatus("companion", "companion: thinking...");
   try {
     const answer = await askTutor(ctx, {
-      projectRoot: root,
-      agentDir,
-      sessionPath: paths.sessionPath,
-      rolePath,
-      roleBody: role.body,
-      provider: resolved.provider,
-      model: resolved.model,
-      effort: resolved.effort,
+      projectRoot: state.root,
+      agentDir: state.agentDir,
+      sessionPath: state.paths.sessionPath,
+      rolePath: state.rolePath,
+      roleBody: state.roleBody,
+      provider: state.provider,
+      model: state.model,
+      effort: state.effort,
       question,
     });
     post(pi, ctx, answer);
@@ -471,6 +625,9 @@ async function handleCompanion(
   const parsed = parseCompanionArgs(args);
   try {
     switch (parsed.kind) {
+      case "open":
+        await openCompanionPane(pi, ctx);
+        return;
       case "status":
         await showStatus(pi, ctx);
         return;
@@ -494,7 +651,7 @@ async function handleCompanion(
 
 export default function companionExtension(pi: ExtensionAPI): void {
   pi.registerCommand("companion", {
-    description: "Read-only tutor chat for this project: ask, status, model, reset.",
+    description: "Read-only tutor chat for this project: ask, open, status, model, reset.",
     handler: async (args, ctx) => handleCompanion(pi, ctx, args),
   });
 }
