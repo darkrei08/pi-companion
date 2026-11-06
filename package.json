@@ -1,0 +1,37 @@
+{
+  "name": "pi-companion",
+  "version": "0.1.0",
+  "description": "A second read-only chat on the same project: the tutor you talk to while another agent does the work.",
+  "type": "module",
+  "license": "MIT",
+  "author": "darkrei08",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darkrei08/pi-companion.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "companion",
+    "tutor"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/companion.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
