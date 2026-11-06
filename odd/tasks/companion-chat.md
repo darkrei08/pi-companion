@@ -24,6 +24,8 @@ S8. The tutor contract is a role file the operator can read and edit, not a stri
 
 S9. Cheap by default and never silent about cost drift: the current model, effort and transcript size are inspectable with one command, and the model can be changed per project without editing JSON by hand.
 
+S10. `/companion open` starts the same tutor as a real interactive Pi session in a pane beside the calling one: same working directory, read-only through `--tools read,grep,find,ls`, the role body as the appended system prompt, the same resolved model and effort, its own persisted session file. Focus stays in the calling pane. Without Herdr, or without the `herdr` binary, it prints the exact command to run by hand and one line saying why.
+
 ## Tasks
 
 | ID | What | Route | Spec | Commit |
@@ -33,6 +35,8 @@ S9. Cheap by default and never silent about cost drift: the current model, effor
 | T3 | Model and effort resolution through alias + role, `/companion status` and `/companion model` | builder | S3 S9 | f5de4a8 |
 | T4 | `pi -e` smoke and unit tests for the pure parts | builder | S6 | f5de4a8 |
 | T5 | Publish: public GitHub repo, install instructions, verification transcript | inline | S7 | github.com/darkrei08/pi-companion |
+| T6 | `/companion open`: Herdr split plus interactive read-only Pi session from the same role and model resolution | builder | S10 | 5c74b99 |
+| T7 | Publish to npm, install from the registry, PRs to pi-companion and pi-ext-roles | inline | S7 | pi-companion@0.1.0 |
 
 ## Log
 
@@ -43,3 +47,7 @@ L2. Video findings that shaped the specs: the second chat must be read-only (S1)
 L3. Comment findings that shaped the specs: the strongest objection in the thread is that a side chat "lacks the decision context of the main one" and only works if the operator is present in real time (@ttlcrl). Persistence across questions (S4) is the mitigation available here: the companion accumulates its own decision narrative instead of starting cold. The counter-position, that the companion deserves the strongest model (@alessiomarchionni), is why the model is configurable (S3, S9) rather than fixed to the cheapest.
 
 L4. Harness constraints discovered by reconnaissance: extensions can create an isolated in-process agent session (`createAgentSession` + `SessionManager.open/inMemory`) with an explicit read-only tool allowlist and a `thinkingLevel`; in `pi -p` there is no UI, so output must be a session message; roles put effort on the model string (`provider/model:effort`) and forbid a separate `thinking:` field; model aliases live in a `modelAliases` map in the pi-ext-roles and pi-extensible-workflows settings files.
+
+L5. Pane mode design notes: `herdr pane split --current --direction <right|down> --cwd <root> --no-focus` returns the new pane as `.result.pane.pane_id`; `herdr pane run <pane> <command>` queues text and Enter, so the role body is shell-quoted into one argument. `pi --append-system-prompt` takes inline text or a path and reads the file when the argument exists, so the body is passed inline to keep the role frontmatter out of the prompt. A wide pane splits right, anything else down, which keeps both panes usable.
+
+L6. Distribution facts: the npm package is `pi-companion@0.1.0`, installed with `pi install npm:pi-companion` (verified in an isolated agent dir); the git source stays available for unreleased branches. The local supply-chain policy blocks mutating `npm` commands, so publishing goes through `pnpm publish --access public`. Two PRs are open: darkrei08/pi-companion#1 (pane mode) and darkrei08/pi-ext-roles#1 (the role in the starter set). The role now exists twice on purpose: the packaged copy drives the extension, and the pi-ext-roles copy makes it dispatchable by workflows and subagents.
