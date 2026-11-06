@@ -26,6 +26,12 @@ S9. Cheap by default and never silent about cost drift: the current model, effor
 
 S10. `/companion open` starts the same tutor as a real interactive Pi session in a pane beside the calling one: same working directory, read-only through `--tools read,grep,find,ls`, the role body as the appended system prompt, the same resolved model and effort, its own persisted session file. Focus stays in the calling pane. Without Herdr, or without the `herdr` binary, it prints the exact command to run by hand and one line saying why.
 
+S11. Pane mode must not be limited by the length of a shell command. The role body travels as a launcher script written into the project's companion state directory, not as an inline argument, because the inline form is near the canonical shell command limit on macOS even though it works on Linux. The launcher is removed when the pane closes or reused in place, never left as a growing pile of scripts.
+
+S12. A new interactive session must not start without a companion beside it: "soprattutto quando si avvia una nuova sessione agents allora ci deve essere sempre a fianco una sessione companion quindi questa è una direttiva da implementare". Auto-open is therefore the default when the session is interactive and inside Herdr, and it must be defensible: the companion session it launches must never open a companion of its own, a headless or non-interactive run must never split a pane, and one setting turns it off.
+
+S13. The interface and the feature set improve from evidence, not from taste: "prova anche online a ricercare con la mia suite data search se esiste qualcosa per migliorare il companion sia graficamente che con interfaccia e sia in funzionalità". Findings are ranked by what Pi can actually support today, with the source for each.
+
 ## Tasks
 
 | ID | What | Route | Spec | Commit |
@@ -37,6 +43,9 @@ S10. `/companion open` starts the same tutor as a real interactive Pi session in
 | T5 | Publish: public GitHub repo, install instructions, verification transcript | inline | S7 | github.com/darkrei08/pi-companion |
 | T6 | `/companion open`: Herdr split plus interactive read-only Pi session from the same role and model resolution | builder | S10 | 5c74b99 |
 | T7 | Publish to npm, install from the registry, PRs to pi-companion and pi-ext-roles | inline | S7 | pi-companion@0.1.0 |
+| T8 | Launcher script instead of an inline prompt body, so pane mode is not length-limited on macOS | builder | S11 | pending |
+| T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | pending |
+| T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | pending |
 
 ## Log
 
@@ -51,3 +60,7 @@ L4. Harness constraints discovered by reconnaissance: extensions can create an i
 L5. Pane mode design notes: `herdr pane split --current --direction <right|down> --cwd <root> --no-focus` returns the new pane as `.result.pane.pane_id`; `herdr pane run <pane> <command>` queues text and Enter, so the role body is shell-quoted into one argument. `pi --append-system-prompt` takes inline text or a path and reads the file when the argument exists, so the body is passed inline to keep the role frontmatter out of the prompt. A wide pane splits right, anything else down, which keeps both panes usable.
 
 L6. Distribution facts: the npm package is `pi-companion@0.1.0`, installed with `pi install npm:pi-companion` (verified in an isolated agent dir); the git source stays available for unreleased branches. The local supply-chain policy blocks mutating `npm` commands, so publishing goes through `pnpm publish --access public`. Two PRs are open: darkrei08/pi-companion#1 (pane mode) and darkrei08/pi-ext-roles#1 (the role in the starter set). The role now exists twice on purpose: the packaged copy drives the extension, and the pi-ext-roles copy makes it dispatchable by workflows and subagents.
+
+L7. Operator request (verbatim): "E esegui il push del pull request rispetto ai commit che abbiamo emergiato nei nostri fork e che sono appunto poi correttamente installati e funzionanti su questo host, dopodiché, procedi a sviluppare e a correggere i fix che hai individuato, ad esempio, per Mac OS o per Linux, e dopodiché, prova anche online a ricercare con la mia suite data search se esiste qualcosa per migliorare il companion sia graficamente che con interfaccia e sia in funzionalità e soprattutto quando si avvia una nuova sessione agents allora ci deve essere sempre a fianco una sessione companion quindi questa è una direttiva da implementare esegui lo sviluppo di queste ultime delle ricerche attraverso Workflow Extensible."
+
+L8. Both earlier PRs are merged on main (pi-companion#1 squash-merged as 1915010, pi-ext-roles#1 as 81180b1) and the host runs the npm build, so the starting point for this round is merged main, not a branch.
