@@ -42,6 +42,8 @@ S17. Dispatch input collapses whitespace and newlines to single spaces, trims th
 
 S18. `/companion send <text>` reuses the same validation, confirmation, and `herdr pane run` path as `dispatch_directive`. The README and companion role describe the one-line rule, human gate, and operator-controlled handoff.
 
+S19. The tutor must be able to consult what the MCP servers know, not only the files: "senza codemode né tool_search gli MCP server (codegraph, context7, engram, browseros, firecrawl) sono irraggiungibili". The pane therefore carries `tool_search` beside the read-only tools, which silences the unreachable-MCP warning without granting arbitrary script execution; `codemode` stays out, and the role tells the tutor that a search may surface MCP tools which write and that those stay out of contract.
+
 ## Tasks
 
 | ID | What | Route | Spec | Commit |
@@ -57,6 +59,7 @@ S18. `/companion send <text>` reuses the same validation, confirmation, and `her
 | T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | this branch |
 | T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | this branch |
 | T11 | Gated caller-pane dispatch through the launcher, tool, and `/companion send` | builder | S14-S18 | this branch |
+| T12 | Reach the MCP servers from the companion through `tool_search`, with `codemode` still off | inline | S19 | this branch |
 
 ## Research: what to steal from the field (S13)
 

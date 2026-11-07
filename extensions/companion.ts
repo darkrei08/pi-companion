@@ -26,7 +26,7 @@ import type { TSchema } from "typebox";
 export const COMPANION_MESSAGE_TYPE = "companion";
 export const COMPANION_MARKER = "PI_COMPANION_SESSION";
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "dispatch_directive"] as const;
+const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "tool_search", "dispatch_directive"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
 export const MAX_DIRECTIVE_LENGTH = 1000;
 const COMPANION_PANE_NAME = "companion";

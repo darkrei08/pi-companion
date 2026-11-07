@@ -287,7 +287,7 @@ test("buildCompanionPaneCommand runs the stable absolute launcher path", () => {
 test("buildCompanionPaneScript marks the launched session as a companion", () => {
   assert.equal(
     buildCompanionPaneScript(PANE_INPUT),
-    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls,dispatch_directive' \\\n  --append-system-prompt 'You are the companion chat.'\n",
+    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls,tool_search,dispatch_directive' \\\n  --append-system-prompt 'You are the companion chat.'\n",
   );
 });
 
@@ -384,7 +384,7 @@ test("the launcher round-trips a hostile body through POSIX sh", () => {
     });
     execFileSync("sh", ["-n", launcher]);
     const output = execFileSync(launcher, { encoding: "utf8" });
-    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls,dispatch_directive --append-system-prompt"));
+    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls,tool_search,dispatch_directive --append-system-prompt"));
     assert.ok(output.endsWith(`${body}\n`));
     assert.equal(statSync(launcher).mode & 0o777, 0o700);
   } finally {
