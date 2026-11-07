@@ -82,6 +82,23 @@ Inside Herdr this splits the calling pane, keeps focus where it is, and starts a
 
 Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
 
+## Which chat for which prompt
+
+The working chat and the companion are not interchangeable. The rule is what the answer should end with.
+
+| If the answer should end with | Ask |
+|---|---|
+| a diff, a commit, a command run | the working chat, which has `edit`, `write` and a shell |
+| your understanding of how something works | the companion |
+| a bounded investigation across many files, with evidence | the companion, in deep shape |
+| a compressed view of a change before you review it | the companion, in summarise shape |
+
+Typical companion questions: how is this feature implemented, why was it done this way, where is the limit of this approach, what would break if I changed it, if this fails at 3am where do I look, which assumptions here are verified and which are guesses.
+
+Typical working-chat prompts: implement, fix, refactor, run the tests, commit.
+
+The companion cannot write, and that is not a limitation to route around: when its answer implies a change, it says what the change is and the human carries that sentence to the working chat.
+
 ## What it deliberately does not do
 
 - **No writing.** The session is created with `read`, `grep`, `find`, `ls`. There is no `edit`, no `write`, no shell, and no argument that adds one.
