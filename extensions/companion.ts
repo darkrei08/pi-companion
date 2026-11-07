@@ -13,7 +13,7 @@ import {
   X_OK,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   CreateAgentSessionOptions,
@@ -26,7 +26,7 @@ export const COMPANION_MESSAGE_TYPE = "companion";
 export const COMPANION_MARKER = "PI_COMPANION_SESSION";
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
-const AUTO_OPEN_ENTRY = "companion_auto_opened";
+const COMPANION_PANE_NAME = "companion";
 
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -220,6 +220,7 @@ export type CompanionPaths = {
   sessionPath: string;
   metaPath: string;
   launcherPath: string;
+  openRecordPath: string;
 };
 
 export function companionPaths(agentDir: string, root: string): CompanionPaths {
@@ -231,7 +232,68 @@ export function companionPaths(agentDir: string, root: string): CompanionPaths {
     sessionPath: join(dir, "session.jsonl"),
     metaPath: join(dir, "meta.json"),
     launcherPath: join(dir, "launcher.sh"),
+    openRecordPath: join(dir, "open.json"),
   };
+}
+
+export type OpenRecord = { sessionId: string; paneId: string; timestamp: string };
+
+export function readOpenRecord(recordPath: string): OpenRecord | undefined {
+  const raw = readJsonObject(recordPath);
+  if (!raw) return undefined;
+  if (typeof raw.sessionId !== "string" || typeof raw.paneId !== "string" || typeof raw.timestamp !== "string")
+    return undefined;
+  return { sessionId: raw.sessionId, paneId: raw.paneId, timestamp: raw.timestamp };
+}
+
+export function writeOpenRecord(recordPath: string, record: OpenRecord): void {
+  mkdirSync(dirname(recordPath), { recursive: true });
+  writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+}
+
+export type HerdrPane = { pane_id: string; workspace_id?: string; cwd?: string; terminal_title_stripped?: string };
+
+/**
+ * Herdr renders a pane title as `<agent> - <session name> - <cwd basename>`.
+ *
+ * The companion pane cannot be recognised by its command: the launcher execs pi, so
+ * `herdr pane process-info` reports `pi` and the launcher path is gone. What survives
+ * is the session name `pi --name companion` sets, so match that name exactly. A loose
+ * `includes("companion")` would skip every session in a directory called
+ * `pi-companion`, and the operator's own pane in that project must still auto-open.
+ */
+export function isCompanionPane(pane: HerdrPane, workspaceId: string, projectRoot: string): boolean {
+  if (pane.workspace_id !== workspaceId || pane.cwd !== projectRoot) return false;
+  const title = pane.terminal_title_stripped;
+  if (typeof title !== "string") return false;
+  return title.replace(/^\S+\s+-\s+/, "") === `${COMPANION_PANE_NAME} - ${basename(projectRoot)}`;
+}
+
+/**
+ * Pure decision: return true when the auto-open should be skipped.
+ *
+ * Skip when:
+ * (a) The persisted record is for this session and that pane still exists in the
+ *     workspace pane list (reload-safe: the record outlives the module).
+ * (b) Any pane in the workspace already looks like this project's companion
+ *     (covers a reload that lost the record file).
+ *
+ * A pane closed by hand drops out of the pane list, so it never blocks a later reopen.
+ */
+export function shouldSkipAutoOpen(
+  sessionId: string,
+  record: OpenRecord | undefined,
+  panes: HerdrPane[],
+  workspaceId: string,
+  projectRoot: string,
+): boolean {
+  const paneIds = new Set(panes.map((p) => p.pane_id));
+
+  // (a) persisted record for this session with pane still alive
+  if (record && record.sessionId === sessionId && paneIds.has(record.paneId)) return true;
+
+  // (b) any pane in this workspace already looks like this project's companion
+  return panes.some((pane) => isCompanionPane(pane, workspaceId, projectRoot));
 }
 
 export type PaneAvailability = { ok: true } | { ok: false; reason: string };
@@ -249,13 +311,11 @@ export type AutoOpenDecision = { open: true; reason: "eligible" } | { open: fals
 export function autoOpenDecision(
   hasUI: boolean,
   herdrAvailable: boolean,
-  alreadyOpened: boolean,
   autoOpenSetting: boolean,
   companionMarker: boolean,
 ): AutoOpenDecision {
   if (!hasUI) return { open: false, reason: "not interactive" };
   if (companionMarker) return { open: false, reason: "companion marker present" };
-  if (alreadyOpened) return { open: false, reason: "already opened" };
   if (!autoOpenSetting) return { open: false, reason: "auto-open disabled" };
   if (!herdrAvailable) return { open: false, reason: "Herdr unavailable" };
   return { open: true, reason: "eligible" };
@@ -587,7 +647,11 @@ async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext)
       `pane ${paneId} created but pi did not start: ${errorLine(run.stderr || run.stdout || "no response")}`,
     );
   }
-  pi.appendEntry(AUTO_OPEN_ENTRY, { paneId });
+  writeOpenRecord(state.paths.openRecordPath, {
+    sessionId: ctx.sessionManager.getSessionId(),
+    paneId,
+    timestamp: new Date().toISOString(),
+  });
   post(pi, ctx, `companion opened in pane ${paneId}\nlauncher: ${state.paths.launcherPath}`);
 }
 
@@ -728,31 +792,38 @@ async function handleCompanion(
 }
 
 export default function companionExtension(pi: ExtensionAPI): void {
-  let autoOpenAttempted = false;
-
   pi.on("session_start", async (_event, ctx) => {
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";
     const agentDir = extensionAgentDir();
-    const alreadyOpened = autoOpenAttempted || ctx.sessionManager.getEntries().some(
-      (entry) => entry.type === "custom" && entry.customType === AUTO_OPEN_ENTRY,
-    );
     const autoOpenSetting = readAutoOpenSetting(agentDir);
 
-    if (!interactive || companionMarker || alreadyOpened || !autoOpenSetting) return;
+    if (!interactive || companionMarker || !autoOpenSetting) return;
 
     const herdrFound = (await exec("herdr", ["--version"])).code === 0;
-    const decision = autoOpenDecision(
-      interactive,
-      paneAvailability(process.env.HERDR_ENV, herdrFound).ok,
-      alreadyOpened,
-      autoOpenSetting,
-      companionMarker,
-    );
+    const herdrOk = paneAvailability(process.env.HERDR_ENV, herdrFound).ok;
+
+    const decision = autoOpenDecision(interactive, herdrOk, autoOpenSetting, companionMarker);
     if (!decision.open) return;
 
-    autoOpenAttempted = true;
+    // Fetch the live pane list and current workspace; pass to the pure guard.
+    const root = resolveProjectRoot(ctx.cwd);
+    const paths = companionPaths(agentDir, root);
+    const [paneListResult, layoutResult] = await Promise.all([
+      exec("herdr", ["pane", "list"]),
+      exec("herdr", ["pane", "layout", "--current"]),
+    ]);
+    const paneList: HerdrPane[] = (() => {
+      const parsed = parseJsonText(paneListResult.stdout);
+      const items = jsonField(parsed, "result", "panes");
+      return Array.isArray(items) ? (items as HerdrPane[]) : [];
+    })();
+    const layout = parseJsonText(layoutResult.stdout);
+    const workspaceId = jsonField(layout, "result", "layout", "workspace_id") as string | undefined;
+    const record = readOpenRecord(paths.openRecordPath);
+    if (shouldSkipAutoOpen(ctx.sessionManager.getSessionId(), record, paneList, workspaceId ?? "", root)) return;
+
     try {
       await openCompanionPane(pi, ctx);
     } catch (error) {

@@ -57,6 +57,10 @@ Automatic pane opening is on by default. Set `~/.pi/agent/companion/settings.jso
 re-enables it. Auto-open runs only for interactive TUI sessions inside Herdr, never for
 RPC, print, JSON, delegated child, workflow child, or companion sessions.
 
+Auto-open is idempotent per session, including across `/reload`: the pane it opened is
+recorded, so a reload never opens a second companion while that pane is alive. A pane you
+close by hand is reopened on the next reload.
+
 ## Commands
 
 | Command | What it does |
@@ -90,7 +94,8 @@ Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` com
 ~/.pi/agent/companion/<project-key>/
 ├── session.jsonl   # the tutor transcript, one per project root
 ├── meta.json       # the model pinned for this project
-└── launcher.sh     # reusable pane launcher, including the recursion guard
+├── launcher.sh     # reusable pane launcher, including the recursion guard
+└── open.json       # the pane auto-open already opened for this session
 ```
 
 `<project-key>` is the first 16 hex characters of the SHA-256 of the resolved project root, so two clones of the same repo do not share a tutor.
