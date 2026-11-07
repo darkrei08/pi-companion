@@ -24,13 +24,23 @@ S8. The tutor contract is a role file the operator can read and edit, not a stri
 
 S9. Cheap by default and never silent about cost drift: the current model, effort and transcript size are inspectable with one command, and the model can be changed per project without editing JSON by hand.
 
-S10. `/companion open` starts the same tutor as a real interactive Pi session in a pane beside the calling one: same working directory, read-only through `--tools read,grep,find,ls`, the role body as the appended system prompt, the same resolved model and effort, its own persisted session file. Focus stays in the calling pane. Without Herdr, or without the `herdr` binary, it prints the exact command to run by hand and one line saying why.
+S10. `/companion open` starts the same tutor as a real interactive Pi session in a pane beside the calling one: same working directory, read-only through `--tools read,grep,find,ls`, plus the gated `dispatch_directive` tool, the role body as the appended system prompt, the same resolved model and effort, its own persisted session file. Focus stays in the calling pane. Without Herdr, or without the `herdr` binary, it prints the exact command to run by hand and one line saying why.
 
 S11. Pane mode must not be limited by the length of a shell command. The role body travels as a launcher script written into the project's companion state directory, not as an inline argument, because the inline form is near the canonical shell command limit on macOS even though it works on Linux. The launcher is removed when the pane closes or reused in place, never left as a growing pile of scripts.
 
 S12. A new interactive session must not start without a companion beside it: "soprattutto quando si avvia una nuova sessione agents allora ci deve essere sempre a fianco una sessione companion quindi questa è una direttiva da implementare". Auto-open is therefore the default when the session is interactive and inside Herdr, and it must be defensible: the companion session it launches must never open a companion of its own, a headless or non-interactive run must never split a pane, and one setting turns it off.
 
 S13. The interface and the feature set improve from evidence, not from taste: "prova anche online a ricercare con la mia suite data search se esiste qualcosa per migliorare il companion sia graficamente che con interfaccia e sia in funzionalità". Findings are ranked by what Pi can actually support today, with the source for each.
+
+S14. The dispatch bridge is gated: "a gated dispatch bridge, so a companion pane can hand the caller pane a directive instead of the operator copy-pasting it." The companion may request work, but it never receives write or shell tools.
+
+S15. The bridge carries the caller pane id through the generated launcher: `HERDR_PANE_ID` becomes `PI_COMPANION_CALLER_PANE`, and the dispatch path uses `herdr pane run <PANE_ID> <TEXT>` so the directive is submitted once.
+
+S16. `dispatch_directive({ prompt, reason })` is registered only for a companion session with a known caller pane. Before sending, the extension shows the collapsed directive and reason through `ctx.ui.confirm`; declining sends nothing and returns a failed tool result.
+
+S17. Dispatch input collapses whitespace and newlines to single spaces, trims the result, rejects empty text and control characters, and caps the directive at 1,000 characters. The normalized payload is passed to `herdr` through an argv array, never a shell string.
+
+S18. `/companion send <text>` reuses the same validation, confirmation, and `herdr pane run` path as `dispatch_directive`. The README and companion role describe the one-line rule, human gate, and operator-controlled handoff.
 
 ## Tasks
 
@@ -46,6 +56,7 @@ S13. The interface and the feature set improve from evidence, not from taste: "p
 | T8 | Launcher script instead of an inline prompt body, so pane mode is not length-limited on macOS | builder | S11 | this branch |
 | T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | this branch |
 | T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | this branch |
+| T11 | Gated caller-pane dispatch through the launcher, tool, and `/companion send` | builder | S14-S18 | this branch |
 
 ## Research: what to steal from the field (S13)
 
@@ -88,3 +99,5 @@ L12. Operator report (verbatim): "Running /reload in an interactive session trig
 L12. The reload spawn was not a duplicate. The operator's session had started before the extension shipped auto-open, so the reload at 07:28 was the first `session_start` that could fire: the transcript marker appears at line 813 of 819, fifteen hours into that session. The fix still stands, because the guard was made from state that was not the pane: `open.json` now records session and pane id, and a title check covers a lost record. It also removed a latent regression, an `includes("companion")` test that would have skipped every session in a directory named `pi-companion`.
 
 L13. Answer contract, from researched style evidence rather than taste: lead with the answer, mechanism before file list, one term per concept, verbs over nominalisations, one hedge per claim with its reason, no closing summary, every behavioural claim with a path. Three shapes cover the operator's three verbs: describe (what it is, how, why, where, not covered), summarise (one line, grouped scope, before and after, must-check, dropped), deep (bounded question, answer with confidence, evidence trail, hypotheses, conflicts, stop rule). Each shape lists what disqualifies an answer in it. Sources included BLUF, the expertise-reversal effect, Chi on self-explanation, Diataxis on explanation as a distinct mode, Google and Microsoft style guides on voice and terminology, and CodeRabbit's structural summary as shipped prior art. Paywalled or abstract-only sources are marked as such in the research, so no rule rests on an unread paper.
+
+L14. Operator request (verbatim): "Implement a feature in the repo /root/git/personale/pi-companion ... FEATURE: a gated dispatch bridge, so a companion pane can hand the caller pane a directive instead of the operator copy-pasting it." The implementation preserves the read-only companion tools, adds a confirmation gate, normalizes to one line, and caps directives at 1,000 characters.
