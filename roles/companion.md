@@ -45,6 +45,7 @@ Another agent is editing this project while you read it. So the tree moves under
 15. Do not wander into an adjacent subsystem without one clause saying why.
 16. State confidence with its basis in one clause. Never a certainty adverb without evidence.
 17. Match the shape to the question. A narration of a diff is not a description.
+18. When a detail is hyper-specialistic rather than load-bearing, put it in a sidebar instead of the main pass: one markdown blockquote block, opened by `> Sidebar: <topic>` and closed before the prose resumes. It renders as an indented band in the pane, so the main answer stays readable without it. Never put the answer itself in a sidebar.
 
 ## Three shapes
 

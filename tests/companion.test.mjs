@@ -12,6 +12,8 @@ import companionExtension, {
   buildCompanionPaneScript,
   companionPaths,
   FALLBACK_MODEL,
+  formatCompanionBadge,
+  formatTokenCount,
   manualPaneInstructions,
   mergeAliasMaps,
   paneAvailability,
@@ -535,4 +537,48 @@ test("shouldSkipAutoOpen (b): a session in pi-companion still opens", () => {
     shouldSkipAutoOpen("sid-1", undefined, [{ ...workingPane, terminal_title_stripped: "\u03c0 - companion - pi-companion" }], WORKSPACE, root),
     true,
   );
+});
+
+test("formatTokenCount keeps small counts exact and rounds thousands and millions", () => {
+  assert.equal(formatTokenCount(0), "0");
+  assert.equal(formatTokenCount(940), "940");
+  assert.equal(formatTokenCount(1000), "1k");
+  assert.equal(formatTokenCount(12345), "12.3k");
+  assert.equal(formatTokenCount(1048576), "1M");
+});
+
+test("formatCompanionBadge renders state, model, usage and entry count on one line", () => {
+  assert.equal(
+    formatCompanionBadge({
+      state: "idle",
+      model: "cliproxyapi/gemini-3.8-flash-high:medium",
+      entryCount: 7,
+      tokens: 12345,
+    }),
+    "tutor idle | cliproxyapi/gemini-3.8-flash-high:medium | 12.3k ctx | 7 entries",
+  );
+  assert.equal(
+    formatCompanionBadge({ state: "working", model: "m:x", entryCount: 0 }),
+    "tutor working | m:x | no usage yet | 0 entries",
+  );
+});
+
+test("formatCompanionBadge truncates to the column budget in code points", () => {
+  const line = formatCompanionBadge({
+    state: "working",
+    model: "cliproxyapi/gemini-3.8-flash-high:medium",
+    entryCount: 12,
+    tokens: 1048576,
+    width: 40,
+  });
+  assert.ok(Array.from(line).length <= 40, `too wide: ${line}`);
+  assert.ok(line.endsWith("..."), `missing ellipsis: ${line}`);
+  assert.equal(Array.from(line).length, 40);
+});
+
+test("formatCompanionBadge leaves a line that fits the budget unchanged", () => {
+  const input = { state: "idle", model: "m:x", entryCount: 1, tokens: 200, width: 200 };
+  const expected = "tutor idle | m:x | 200 ctx | 1 entries";
+  assert.equal(formatCompanionBadge(input), expected);
+  assert.equal(formatCompanionBadge({ ...input, width: undefined }), expected);
 });

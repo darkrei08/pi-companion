@@ -879,6 +879,62 @@ async function handleCompanion(
   }
 }
 
+export function formatTokenCount(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 1000) return String(Math.round(Math.max(0, tokens)));
+  const thousands = Math.round(tokens / 100) / 10;
+  if (thousands < 1000) return `${thousands}k`;
+  return `${Math.round(tokens / 100_000) / 10}M`;
+}
+
+export function formatCompanionBadge(input: {
+  state: "idle" | "working";
+  model: string;
+  entryCount: number;
+  tokens?: number;
+  width?: number;
+}): string {
+  const usage = input.tokens === undefined ? "no usage yet" : `${formatTokenCount(input.tokens)} ctx`;
+  const line = `tutor ${input.state} | ${input.model} | ${usage} | ${input.entryCount} entries`;
+  const limit = input.width && input.width > 8 ? input.width : 80;
+  // Code points, not UTF-16 units, so a wide grapheme is never cut in half.
+  const chars = Array.from(line);
+  if (chars.length <= limit) return line;
+  return `${chars.slice(0, limit - 3).join("")}...`;
+}
+
+type BadgeContext = {
+  cwd: string;
+  ui: {
+    theme: { fg(color: "accent" | "dim", text: string): string };
+    setStatus(key: string, text: string | undefined): void;
+  };
+  getContextUsage(): { tokens?: number | null } | undefined;
+  sessionManager: { getEntries(): readonly unknown[] };
+};
+
+const COMPANION_STATUS_KEY = "companion";
+
+function setCompanionBadge(ctx: BadgeContext, state: "idle" | "working"): void {
+  if (process.env[COMPANION_MARKER] !== "1") return;
+  const agentDir = extensionAgentDir();
+  const root = resolveProjectRoot(ctx.cwd);
+  const paths = companionPaths(agentDir, root);
+  const resolved = resolveCompanionModel({
+    metaModel: readMeta(paths.metaPath)?.model,
+    extensionModel: readExtensionModel(agentDir),
+    roleModel: readRoleFile(companionRolePath()).model,
+    aliases: readAliasMap(agentDir),
+  });
+  if (!resolved.ok) return;
+  const text = formatCompanionBadge({
+    state,
+    model: `${resolved.provider}/${resolved.model}:${resolved.effort}`,
+    entryCount: ctx.sessionManager.getEntries().length,
+    tokens: ctx.getContextUsage()?.tokens ?? undefined,
+  });
+  ctx.ui.setStatus(COMPANION_STATUS_KEY, ctx.ui.theme.fg(state === "working" ? "accent" : "dim", text));
+}
+
 export default function companionExtension(pi: ExtensionAPI): void {
   const callerPaneId = process.env.PI_COMPANION_CALLER_PANE?.trim();
   if (process.env[COMPANION_MARKER] === "1" && callerPaneId) {
@@ -894,7 +950,11 @@ export default function companionExtension(pi: ExtensionAPI): void {
     });
   }
 
+  pi.on("turn_start", (_event, ctx) => setCompanionBadge(ctx, "working"));
+  pi.on("turn_end", (_event, ctx) => setCompanionBadge(ctx, "idle"));
+
   pi.on("session_start", async (_event, ctx) => {
+    setCompanionBadge(ctx, "idle");
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";
