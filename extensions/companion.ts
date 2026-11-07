@@ -332,9 +332,11 @@ export function autoOpenDecision(
   herdrAvailable: boolean,
   autoOpenSetting: boolean,
   companionMarker: boolean,
+  workflowChild: boolean,
 ): AutoOpenDecision {
   if (!hasUI) return { open: false, reason: "not interactive" };
   if (companionMarker) return { open: false, reason: "companion marker present" };
+  if (workflowChild) return { open: false, reason: "workflow child session" };
   if (!autoOpenSetting) return { open: false, reason: "auto-open disabled" };
   if (!herdrAvailable) return { open: false, reason: "Herdr unavailable" };
   return { open: true, reason: "eligible" };
@@ -896,15 +898,18 @@ export default function companionExtension(pi: ExtensionAPI): void {
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";
+    // A workflow worker pane is a full interactive TUI session, so the only way to
+    // recognise it is the environment @piewf/herdr prefixes onto the command it runs.
+    const workflowChild = process.env.PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER === "1";
     const agentDir = extensionAgentDir();
     const autoOpenSetting = readAutoOpenSetting(agentDir);
 
-    if (!interactive || companionMarker || !autoOpenSetting) return;
+    if (!interactive || companionMarker || workflowChild || !autoOpenSetting) return;
 
     const herdrFound = (await exec("herdr", ["--version"])).code === 0;
     const herdrOk = paneAvailability(process.env.HERDR_ENV, herdrFound).ok;
 
-    const decision = autoOpenDecision(interactive, herdrOk, autoOpenSetting, companionMarker);
+    const decision = autoOpenDecision(interactive, herdrOk, autoOpenSetting, companionMarker, workflowChild);
     if (!decision.open) return;
 
     // Fetch the live pane list and current workspace; pass to the pure guard.

@@ -407,11 +407,12 @@ test("readAutoOpenSetting defaults to on and respects an explicit false", () => 
 });
 
 test("autoOpenDecision covers the interactive Herdr matrix and companion marker guard", () => {
-  assert.deepEqual(autoOpenDecision(true, true, true, false), { open: true, reason: "eligible" });
-  assert.deepEqual(autoOpenDecision(false, true, true, false), { open: false, reason: "not interactive" });
-  assert.deepEqual(autoOpenDecision(true, false, true, false), { open: false, reason: "Herdr unavailable" });
-  assert.deepEqual(autoOpenDecision(true, true, false, false), { open: false, reason: "auto-open disabled" });
-  assert.deepEqual(autoOpenDecision(true, true, true, true), { open: false, reason: "companion marker present" });
+  assert.deepEqual(autoOpenDecision(true, true, true, false, false), { open: true, reason: "eligible" });
+  assert.deepEqual(autoOpenDecision(false, true, true, false, false), { open: false, reason: "not interactive" });
+  assert.deepEqual(autoOpenDecision(true, false, true, false, false), { open: false, reason: "Herdr unavailable" });
+  assert.deepEqual(autoOpenDecision(true, true, false, false, false), { open: false, reason: "auto-open disabled" });
+  assert.deepEqual(autoOpenDecision(true, true, true, true, false), { open: false, reason: "companion marker present" });
+  assert.deepEqual(autoOpenDecision(true, true, true, false, true), { open: false, reason: "workflow child session" });
 });
 
 test("paneAvailability states exactly why the pane cannot open", () => {

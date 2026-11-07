@@ -44,6 +44,8 @@ S18. `/companion send <text>` reuses the same validation, confirmation, and `her
 
 S19. The tutor must be able to consult what the MCP servers know, not only the files: "senza codemode né tool_search gli MCP server (codegraph, context7, engram, browseros, firecrawl) sono irraggiungibili". The pane therefore carries `tool_search` beside the read-only tools, which silences the unreachable-MCP warning without granting arbitrary script execution; `codemode` stays out, and the role tells the tutor that a search may surface MCP tools which write and that those stay out of contract.
 
+S20. A workflow worker pane must never open a companion of its own. `@piewf/herdr` launches every worker as a full interactive TUI session (`@piewf/herdr/dist/index.js:289` prefixes the environment onto the command it runs) and marks it only through `PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1`, never through `GENTLE_PI_AGENTS_CHILD`, so the delegated-child check alone misses it and the worker's `autoOpenDecision` came back eligible. Auto-open therefore stands down for that marker too, which the README already promised.
+
 ## Tasks
 
 | ID | What | Route | Spec | Commit |
@@ -60,6 +62,7 @@ S19. The tutor must be able to consult what the MCP servers know, not only the f
 | T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | this branch |
 | T11 | Gated caller-pane dispatch through the launcher, tool, and `/companion send` | builder | S14-S18 | this branch |
 | T12 | Reach the MCP servers from the companion through `tool_search`, with `codemode` still off | inline | S19 | this branch |
+| T13 | Stand down auto-open for workflow worker panes through the `@piewf/herdr` environment marker | inline | S20 | this branch |
 
 ## Research: what to steal from the field (S13)
 
@@ -104,3 +107,5 @@ L12. The reload spawn was not a duplicate. The operator's session had started be
 L13. Answer contract, from researched style evidence rather than taste: lead with the answer, mechanism before file list, one term per concept, verbs over nominalisations, one hedge per claim with its reason, no closing summary, every behavioural claim with a path. Three shapes cover the operator's three verbs: describe (what it is, how, why, where, not covered), summarise (one line, grouped scope, before and after, must-check, dropped), deep (bounded question, answer with confidence, evidence trail, hypotheses, conflicts, stop rule). Each shape lists what disqualifies an answer in it. Sources included BLUF, the expertise-reversal effect, Chi on self-explanation, Diataxis on explanation as a distinct mode, Google and Microsoft style guides on voice and terminology, and CodeRabbit's structural summary as shipped prior art. Paywalled or abstract-only sources are marked as such in the research, so no rule rests on an unread paper.
 
 L14. Operator request (verbatim): "Implement a feature in the repo /root/git/personale/pi-companion ... FEATURE: a gated dispatch bridge, so a companion pane can hand the caller pane a directive instead of the operator copy-pasting it." The implementation preserves the read-only companion tools, adds a confirmation gate, normalizes to one line, and caps directives at 1,000 characters.
+
+L15. Operator request (verbatim): "Aggiungi in extensions/companion.ts la guardia per saltare l'auto-open del companion quando sono presenti marker di workflow o sottoagenti come PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER" ... "Quando un workflow esegue un task tramite @piewf/herdr, il processo secondario viene avviato in un riquadro Herdr interattivo con TUI attivo. Tale ambiente non imposta GENTLE_PI_AGENTS_CHILD, ma valorizza variabili specifiche come PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=\"1\"" ... "Di conseguenza autoOpenDecision restituisce esito positivo e genera un riquadro companion ridondante anche per il worker del workflow." Verified in the source: the marker is prefixed onto the command run in the created pane, so the worker session carries it. The README already stated this behaviour, so the defect was documentation ahead of code.
