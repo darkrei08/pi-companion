@@ -21,12 +21,24 @@ import type {
   ExtensionCommandContext,
   ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
 
 export const COMPANION_MESSAGE_TYPE = "companion";
 export const COMPANION_MARKER = "PI_COMPANION_SESSION";
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "tool_search", "dispatch_directive"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
+export const MAX_DIRECTIVE_LENGTH = 1000;
 const COMPANION_PANE_NAME = "companion";
+const DISPATCH_PARAMETERS = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "One-line directive for the caller pane." },
+    reason: { type: "string", description: "Why the caller should receive this directive." },
+  },
+  required: ["prompt", "reason"],
+  additionalProperties: false,
+} as TSchema;
 
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -38,6 +50,7 @@ export const USAGE = [
   "/companion open                                  open the tutor as a Pi session in a pane beside this one",
   "/companion status                                show model, effort, transcript size and project key",
   "/companion model <alias|provider/model[:effort]> set this project's model",
+  "/companion send <prompt>                         ask the companion to dispatch a directive to its caller",
   "/companion reset                                 archive the transcript and start a fresh one",
   "/companion auto on|off                          enable or disable automatic pane opening",
 ].join("\n");
@@ -55,6 +68,7 @@ export type ParsedCommand =
   | { kind: "reset" }
   | { kind: "auto"; value: boolean }
   | { kind: "model"; value: string }
+  | { kind: "send"; prompt: string }
   | { kind: "question"; question: string };
 
 export type CompanionMeta = { model?: string; cwd: string; created: string };
@@ -70,6 +84,11 @@ export function parseCompanionArgs(args: string): ParsedCommand {
   if (text === "auto off") return { kind: "auto", value: false };
   if (text === "auto") return { kind: "usage" };
   if (text === "model") return { kind: "usage" };
+  if (text === "send") return { kind: "usage" };
+  if (text.startsWith("send ")) {
+    const prompt = text.slice("send ".length).trim();
+    return prompt ? { kind: "send", prompt } : { kind: "usage" };
+  }
   if (text.startsWith("model ")) {
     const value = text.slice("model ".length).trim();
     return value ? { kind: "model", value } : { kind: "usage" };
@@ -340,11 +359,15 @@ export function buildCompanionPaneScript(input: {
   model: string;
   effort: Effort;
   roleBody: string;
+  callerPaneId?: string;
 }): string {
   return [
     "#!/bin/sh",
     `export ${COMPANION_MARKER}=1`,
-    `exec ${shellQuote(input.piPath)} \\\n  --name ${shellQuote("companion")} \\\n  --model ${shellQuote(`${input.provider}/${input.model}:${input.effort}`)} \\\n  --tools ${shellQuote(READ_ONLY_TOOLS.join(","))} \\\n  --append-system-prompt ${shellQuote(input.roleBody)}`,
+    ...(input.callerPaneId?.trim()
+      ? [`export PI_COMPANION_CALLER_PANE=${shellQuote(input.callerPaneId.trim())}`]
+      : []),
+    `exec ${shellQuote(input.piPath)} \\\n  --name ${shellQuote("companion")} \\\n  --model ${shellQuote(`${input.provider}/${input.model}:${input.effort}`)} \\\n  --tools ${shellQuote(COMPANION_PANE_TOOLS.join(","))} \\\n  --append-system-prompt ${shellQuote(input.roleBody)}`,
     "",
   ].join("\n");
 }
@@ -420,6 +443,12 @@ function errorLine(error: unknown): string {
 
 type ExecResult = { code: number; stdout: string; stderr: string };
 
+type DispatchResult = {
+  content: [{ type: "text"; text: string }];
+  details: Record<string, never>;
+  isError?: boolean;
+};
+
 function exec(file: string, args: string[]): Promise<ExecResult> {
   return new Promise((done) => {
     execFile(file, args, { maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
@@ -427,6 +456,56 @@ function exec(file: string, args: string[]): Promise<ExecResult> {
       done({ code, stdout, stderr });
     });
   });
+}
+
+function dispatchFailure(message: string): DispatchResult {
+  return { content: [{ type: "text", text: message }], details: {}, isError: true };
+}
+
+function normalizeDirective(prompt: unknown): string {
+  if (typeof prompt !== "string") throw new Error("prompt must be a string");
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(prompt)) {
+    throw new Error("prompt contains control characters");
+  }
+  const normalized = prompt.replace(/\s+/gu, " ").trim();
+  if (!normalized) throw new Error("prompt must not be empty");
+  if (normalized.length > MAX_DIRECTIVE_LENGTH) {
+    throw new Error(`prompt exceeds the ${MAX_DIRECTIVE_LENGTH}-character limit`);
+  }
+  return normalized;
+}
+
+async function dispatchDirective(
+  ctx: Pick<ExtensionCommandContext, "hasUI" | "ui">,
+  prompt: unknown,
+  reason: unknown,
+  callerPaneId: string | undefined = process.env.PI_COMPANION_CALLER_PANE?.trim(),
+): Promise<DispatchResult> {
+  if (!callerPaneId) return dispatchFailure("Dispatch is unavailable: caller pane is unknown.");
+  if (!ctx.hasUI) return dispatchFailure("Dispatch is unavailable without an interactive UI.");
+
+  let normalized: string;
+  try {
+    normalized = normalizeDirective(prompt);
+  } catch (error) {
+    return dispatchFailure(`Dispatch rejected: ${errorLine(error)}.`);
+  }
+
+  const why = typeof reason === "string" && reason.trim() ? reason.trim() : "No reason supplied.";
+  const approved = await ctx.ui.confirm(
+    "Send directive to caller pane?",
+    `This types into pane ${callerPaneId} and starts that agent working.\n\nReason: ${why}\n\nDirective: ${normalized}`,
+  );
+  if (!approved) return dispatchFailure("Dispatch cancelled; nothing was sent.");
+
+  const result = await exec("herdr", ["pane", "run", callerPaneId, normalized]);
+  if (result.code !== 0) {
+    return dispatchFailure(`Dispatch failed: ${errorLine(result.stderr || result.stdout || "no response")}.`);
+  }
+  return {
+    content: [{ type: "text", text: `Directive sent to caller pane ${callerPaneId}.` }],
+    details: {},
+  };
 }
 
 function parseJsonText(text: string): unknown {
@@ -607,6 +686,7 @@ async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext)
       model: state.model,
       effort: state.effort,
       roleBody: state.roleBody,
+      callerPaneId: process.env.HERDR_PANE_ID?.trim(),
     }),
   );
   const command = buildCompanionPaneCommand(state.paths.launcherPath);
@@ -773,6 +853,12 @@ async function handleCompanion(
       case "model":
         setCompanionModel(pi, ctx, parsed.value);
         return;
+      case "send": {
+        const result = await dispatchDirective(ctx, parsed.prompt, "The companion requested this directive.");
+        if (result.isError) post(pi, ctx, `companion: ${result.content[0].text}`);
+        else post(pi, ctx, result.content[0].text);
+        return;
+      }
       case "reset":
         resetCompanion(pi, ctx);
         return;
@@ -792,6 +878,20 @@ async function handleCompanion(
 }
 
 export default function companionExtension(pi: ExtensionAPI): void {
+  const callerPaneId = process.env.PI_COMPANION_CALLER_PANE?.trim();
+  if (process.env[COMPANION_MARKER] === "1" && callerPaneId) {
+    pi.registerTool({
+      name: "dispatch_directive",
+      label: "Dispatch directive",
+      description: `After operator confirmation, type a one-line directive into the caller pane's prompt and start that agent working. Newlines collapse to spaces; control characters are rejected; maximum length is ${MAX_DIRECTIVE_LENGTH} characters.`,
+      parameters: DISPATCH_PARAMETERS,
+      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+        const input = params as { prompt: unknown; reason: unknown };
+        return dispatchDirective(ctx, input.prompt, input.reason, callerPaneId);
+      },
+    });
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";

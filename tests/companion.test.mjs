@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
+import companionExtension, {
   archiveSessionPath,
   autoOpenDecision,
   buildCompanionPaneCommand,
@@ -31,6 +31,51 @@ import {
 } from "../extensions/companion.ts";
 
 const ALIASES = { "companion-model": "cliproxyapi/gemini-3.8-flash-high:medium" };
+
+async function withEnv(values, callback) {
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await callback();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function registeredExtension(values) {
+  const tools = [];
+  const commands = new Map();
+  companionExtension({
+    on() {},
+    registerCommand(name, command) {
+      commands.set(name, command);
+    },
+    registerTool(tool) {
+      tools.push(tool);
+    },
+  });
+  return { tools, commands };
+}
+
+function fakeHerdr() {
+  const dir = mkdtempSync(join(tmpdir(), "companion-herdr-"));
+  const log = join(dir, "calls.log");
+  const binary = join(dir, "herdr");
+  writeFileSync(binary, '#!/bin/sh\nprintf \'%s\\t\' "$@" >> "$HERDR_TEST_LOG"\nprintf \'\\n\' >> "$HERDR_TEST_LOG"\n', {
+    mode: 0o700,
+  });
+  return { dir, log, binary };
+}
+
+function toolText(result) {
+  return result.content.map((block) => block.text ?? "").join("\\n");
+}
 
 test("projectKey derives the first 16 hex chars of sha256 of the resolved root", () => {
   assert.equal(projectKey("/tmp/project"), "f630ad93b344dd6b");
@@ -201,6 +246,10 @@ test("parseCompanionArgs treats a lone unknown token as usage and prose as a que
     kind: "question",
     question: "why does the queue exist?",
   });
+  assert.deepEqual(parseCompanionArgs("send inspect the queue"), {
+    kind: "send",
+    prompt: "inspect the queue",
+  });
 });
 
 test("archiveSessionPath keeps the transcript and appends a sortable timestamp", () => {
@@ -238,13 +287,91 @@ test("buildCompanionPaneCommand runs the stable absolute launcher path", () => {
 test("buildCompanionPaneScript marks the launched session as a companion", () => {
   assert.equal(
     buildCompanionPaneScript(PANE_INPUT),
-    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls' \\\n  --append-system-prompt 'You are the companion chat.'\n",
+    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls,tool_search,dispatch_directive' \\\n  --append-system-prompt 'You are the companion chat.'\n",
   );
+});
+
+test("buildCompanionPaneScript exports the caller pane only when one is known", () => {
+  assert.match(
+    buildCompanionPaneScript({ ...PANE_INPUT, callerPaneId: "w7F:p1" }),
+    /export PI_COMPANION_CALLER_PANE='w7F:p1'\nexec/,
+  );
+  assert.doesNotMatch(buildCompanionPaneScript(PANE_INPUT), /PI_COMPANION_CALLER_PANE/);
 });
 
 test("shellQuote keeps the role body a single shell argument, apostrophes included", () => {
   assert.equal(shellQuote("It's fine"), "'It'\\''s fine'");
   assert.equal(shellQuote("two\nlines"), "'two\nlines'");
+});
+
+test("dispatch_directive is registered only for a companion with a caller pane", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    assert.equal(registeredExtension().tools.some((tool) => tool.name === "dispatch_directive"), true);
+  });
+  await withEnv({ PI_COMPANION_SESSION: undefined, PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    assert.equal(registeredExtension().tools.some((tool) => tool.name === "dispatch_directive"), false);
+  });
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: undefined }, async () => {
+    assert.equal(registeredExtension().tools.some((tool) => tool.name === "dispatch_directive"), false);
+  });
+});
+
+test("approved dispatch collapses newlines and runs herdr once for the caller pane", async () => {
+  const herdr = fakeHerdr();
+  try {
+    await withEnv(
+      {
+        PI_COMPANION_SESSION: "1",
+        PI_COMPANION_CALLER_PANE: "w7F:p1",
+        HERDR_TEST_LOG: herdr.log,
+        PATH: `${herdr.dir}:${process.env.PATH}`,
+      },
+      async () => {
+        const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+        const result = await tool.execute(
+          "call-1",
+          { prompt: "  inspect\nthe queue\tthen report  ", reason: "The operator asked for the next step." },
+          undefined,
+          undefined,
+          { hasUI: true, ui: { confirm: async () => true } },
+        );
+        assert.equal(result.isError, undefined);
+        assert.match(toolText(result), /w7F:p1/);
+        assert.equal(readFileSync(herdr.log, "utf8"), "pane\trun\tw7F:p1\tinspect the queue then report\t\n");
+      },
+    );
+  } finally {
+    rmSync(herdr.dir, { recursive: true, force: true });
+  }
+});
+
+test("declined dispatch sends nothing and returns a failed result", async () => {
+  const herdr = fakeHerdr();
+  try {
+    await withEnv(
+      {
+        PI_COMPANION_SESSION: "1",
+        PI_COMPANION_CALLER_PANE: "w7F:p1",
+        HERDR_TEST_LOG: herdr.log,
+        PATH: `${herdr.dir}:${process.env.PATH}`,
+      },
+      async () => {
+        const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+        const result = await tool.execute(
+          "call-2",
+          { prompt: "inspect the queue", reason: "The operator asked for the next step." },
+          undefined,
+          undefined,
+          { hasUI: true, ui: { confirm: async () => false } },
+        );
+        assert.equal(result.isError, true);
+        assert.match(toolText(result), /cancel/i);
+        assert.equal(existsSync(herdr.log), false);
+      },
+    );
+  } finally {
+    rmSync(herdr.dir, { recursive: true, force: true });
+  }
 });
 
 test("the launcher round-trips a hostile body through POSIX sh", () => {
@@ -257,7 +384,7 @@ test("the launcher round-trips a hostile body through POSIX sh", () => {
     });
     execFileSync("sh", ["-n", launcher]);
     const output = execFileSync(launcher, { encoding: "utf8" });
-    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls --append-system-prompt"));
+    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls,tool_search,dispatch_directive --append-system-prompt"));
     assert.ok(output.endsWith(`${body}\n`));
     assert.equal(statSync(launcher).mode & 0o777, 0o700);
   } finally {

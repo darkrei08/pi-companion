@@ -69,6 +69,7 @@ close by hand is reopened on the next reload.
 | `/companion open` | Start the tutor as a real Pi session in a pane beside this one |
 | `/companion status` | Model, effort, which source it came from, transcript path, entries, bytes, project key |
 | `/companion model <alias\|provider/model[:effort]>` | Validate a model and pin it for this project |
+| `/companion send <prompt>` | Ask the companion to dispatch a confirmed directive to its caller pane |
 | `/companion reset` | Archive the current transcript and start clean |
 | `/companion auto on\|off` | Enable or disable automatic companion pane opening |
 
@@ -78,9 +79,13 @@ close by hand is reopened on the next reload.
 /companion open
 ```
 
-Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, `--tools read,grep,find,ls`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down. A `session_start` handler performs the same open path automatically for eligible sessions, and the launcher sets `PI_COMPANION_SESSION=1` so the companion cannot recursively open another pane.
+Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, the read-only tools plus `tool_search` and `dispatch_directive`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down. A `session_start` handler performs the same open path automatically for eligible sessions, and the launcher sets `PI_COMPANION_SESSION=1` so the companion cannot recursively open another pane.
 
 Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
+
+When the companion was launched from a caller pane, it also exposes `dispatch_directive` to the model. After the operator confirms the target, the tool collapses the directive to one line and types it into the caller's prompt with `herdr pane run`; it rejects control characters and directives longer than 1,000 characters.
+
+The companion also carries `tool_search`, so the MCP servers Pi knows about are reachable from that pane: naming tools with plain names replaces the whole selection, and without `tool_search` or `codemode` an MCP tool can never be called. `tool_search` declares a matching MCP tool for the next model call, so the tutor can consult codegraph or Engram inside the same read-only contract. `codemode` stays off on purpose: it would hand the tutor arbitrary script execution. A search can still surface MCP tools that write, such as the memory save tools; the role file tells the tutor to treat those as out of contract.
 
 ## Which chat for which prompt
 
