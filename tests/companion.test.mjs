@@ -26,6 +26,7 @@ import companionExtension, {
   isCompanionPane,
   resolveCompanionModel,
   resolveModelRef,
+  rightAlign,
   shellQuote,
   shouldSkipAutoOpen,
   splitDirection,
@@ -574,6 +575,51 @@ test("formatCompanionBadge truncates to the column budget in code points", () =>
   assert.ok(Array.from(line).length <= 40, `too wide: ${line}`);
   assert.ok(line.endsWith("..."), `missing ellipsis: ${line}`);
   assert.equal(Array.from(line).length, 40);
+
+  const measured = formatCompanionBadge({
+    state: "working",
+    model: "cliproxyapi/gemini-3.8-flash-high:medium",
+    entryCount: 12,
+    tokens: 1048576,
+    contextWindow: 200000,
+    percent: 524.3,
+    width: 40,
+  });
+  assert.ok(Array.from(measured).length <= 40, `too wide: ${measured}`);
+  assert.ok(measured.endsWith("..."), `missing ellipsis: ${measured}`);
+});
+
+test("formatCompanionBadge shows tokens, window and percent when both are known", () => {
+  assert.equal(
+    formatCompanionBadge({
+      state: "idle",
+      model: "m:x",
+      entryCount: 3,
+      tokens: 12345,
+      contextWindow: 200000,
+      percent: 6.2,
+    }),
+    "tutor idle | m:x | 12.3k/200k (6%) ctx | 3 entries",
+  );
+  // An unknown percent falls back to the tokens-only segment.
+  assert.equal(
+    formatCompanionBadge({ state: "idle", model: "m:x", entryCount: 3, tokens: 12345, contextWindow: 200000, percent: null }),
+    "tutor idle | m:x | 12.3k ctx | 3 entries",
+  );
+  // A known window does not invent a token count.
+  assert.equal(
+    formatCompanionBadge({ state: "idle", model: "m:x", entryCount: 3, contextWindow: 200000, percent: 6 }),
+    "tutor idle | m:x | no usage yet | 3 entries",
+  );
+});
+
+test("rightAlign pads on the left to the exact width and never cuts", () => {
+  assert.equal(rightAlign("abc", 6), "   abc");
+  assert.equal(Array.from(rightAlign("x", 80)).length, 80);
+  assert.equal(rightAlign("abc", 3), "abc");
+  assert.equal(rightAlign("abcdef", 3), "abcdef");
+  assert.equal(rightAlign("abc", 0), "abc");
+  assert.equal(rightAlign("abc", Number.NaN), "abc");
 });
 
 test("formatCompanionBadge leaves a line that fits the budget unchanged", () => {

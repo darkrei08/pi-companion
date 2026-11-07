@@ -83,6 +83,8 @@ Inside Herdr this splits the calling pane, keeps focus where it is, and starts a
 
 Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
 
+The companion pane also carries a usage band below the editor, right-aligned, showing the tutor state, the resolved model, the context tokens against the window with its percent, and the transcript entry count (`tutor idle | cliproxyapi/gemini-3.8-flash-high:medium | 12.3k/200k (6%) ctx | 7 entries`). It renders in a companion session only, because `ctx.getContextUsage()` reports the calling session's tokens.
+
 When the companion was launched from a caller pane, it also exposes `dispatch_directive` to the model. After the operator confirms the target, the tool collapses the directive to one line and types it into the caller's prompt with `herdr pane run`; it rejects control characters and directives longer than 1,000 characters.
 
 The companion also carries `tool_search`, so the MCP servers Pi knows about are reachable from that pane: naming tools with plain names replaces the whole selection, and without `tool_search` or `codemode` an MCP tool can never be called. `tool_search` declares a matching MCP tool for the next model call, so the tutor can consult codegraph or Engram inside the same read-only contract. `codemode` stays off on purpose: it would hand the tutor arbitrary script execution. A search can still surface MCP tools that write, such as the memory save tools; the role file tells the tutor to treat those as out of contract.

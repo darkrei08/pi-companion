@@ -46,7 +46,9 @@ S19. The tutor must be able to consult what the MCP servers know, not only the f
 
 S20. A workflow worker pane must never open a companion of its own. `@piewf/herdr` launches every worker as a full interactive TUI session (`@piewf/herdr/dist/index.js:289` prefixes the environment onto the command it runs) and marks it only through `PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1`, never through `GENTLE_PI_AGENTS_CHILD`, so the delegated-child check alone misses it and the worker's `autoOpenDecision` came back eligible. Auto-open therefore stands down for that marker too, which the README already promised.
 
-S21. The companion pane carries its own one-line footer badge, published through `ctx.ui.setStatus("companion", ...)` so the built-in footer is never replaced: `tutor <idle|working> | <provider>/<model>:<effort> | <tokens> ctx | <n> entries`, in `dim` when idle and `accent` while a turn runs, refreshed on `session_start`, `turn_start` and `turn_end`. It exceeds 80 columns only when the pane allows it: the string is cut to the budget in code points with a trailing `...`. It appears in a companion session only, because `ctx.getContextUsage()` reports the calling session's tokens and a badge in the operator's pane would show someone else's number.
+S21. The companion pane carries its own one-line footer badge, published through `ctx.ui.setStatus("companion", ...)` so the built-in footer is never replaced: `tutor <idle|working> | <provider>/<model>:<effort> | <tokens> ctx | <n> entries`, in `dim` when idle and `accent` while a turn runs, refreshed on `session_start`, `turn_start` and `turn_end`. It exceeds 80 columns only when the pane allows it: the string is cut to the budget in code points with a trailing `...`. It appears in a companion session only, because `ctx.getContextUsage()` reports the calling session's tokens and a badge in the operator's pane would show someone else's number. Superseded by S22.
+
+S22. The usage line lives in a widget band below the editor, not in the footer badge: Pi 1.5.0 has only `aboveEditor` and `belowEditor` placements, so a right-aligned band is the reachable approximation of the operator's columns. The band is registered as `ctx.ui.setWidget("companion-usage", factory, { placement: "belowEditor" })` and renders the single line S21 describes, extended with the context window and its percent (`<tokens>/<window> (<percent>%) ctx`, tokens-only when the percent is unknown), right-aligned by padding to the rendered width, in `dim` when idle and `accent` while a turn runs. Below 40 columns the model segment is dropped rather than overflowing. The `setStatus` publishing path is gone: one pane shows those numbers once. It still appears in a companion session only.
 
 ## Tasks
 
@@ -67,6 +69,7 @@ S21. The companion pane carries its own one-line footer badge, published through
 | T13 | Stand down auto-open for workflow worker panes through the `@piewf/herdr` environment marker | inline | S20 | this branch |
 | T14 | Footer badge for the companion pane: tutor state, model, context tokens, transcript size | developer | S21 | this branch |
 | T15 | Specialist-sidebar answer rule so hyper-specialistic detail leaves the main pass | developer | S2 | this branch |
+| T16 | Right-aligned usage band below the editor, replacing the footer badge | developer | S22 | this branch |
 
 ## Research: what to steal from the field (S13)
 

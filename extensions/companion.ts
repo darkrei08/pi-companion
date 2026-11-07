@@ -888,13 +888,30 @@ export function formatTokenCount(tokens: number): string {
 
 export function formatCompanionBadge(input: {
   state: "idle" | "working";
-  model: string;
+  model?: string;
   entryCount: number;
   tokens?: number;
+  contextWindow?: number;
+  percent?: number | null;
   width?: number;
 }): string {
-  const usage = input.tokens === undefined ? "no usage yet" : `${formatTokenCount(input.tokens)} ctx`;
-  const line = `tutor ${input.state} | ${input.model} | ${usage} | ${input.entryCount} entries`;
+  const tokens = typeof input.tokens === "number" && Number.isFinite(input.tokens) ? input.tokens : undefined;
+  const window =
+    typeof input.contextWindow === "number" && Number.isFinite(input.contextWindow) && input.contextWindow > 0
+      ? input.contextWindow
+      : undefined;
+  const percent =
+    typeof input.percent === "number" && Number.isFinite(input.percent) ? input.percent : undefined;
+  const usage =
+    tokens === undefined
+      ? "no usage yet"
+      : window !== undefined && percent !== undefined
+        ? `${formatTokenCount(tokens)}/${formatTokenCount(window)} (${Math.round(percent)}%) ctx`
+        : `${formatTokenCount(tokens)} ctx`;
+  // An empty model drops its segment, so the narrow form keeps one separator per field.
+  const line = [`tutor ${input.state}`, input.model ?? "", usage, `${input.entryCount} entries`]
+    .filter((segment) => segment !== "")
+    .join(" | ");
   const limit = input.width && input.width > 8 ? input.width : 80;
   // Code points, not UTF-16 units, so a wide grapheme is never cut in half.
   const chars = Array.from(line);
@@ -902,19 +919,33 @@ export function formatCompanionBadge(input: {
   return `${chars.slice(0, limit - 3).join("")}...`;
 }
 
+export function rightAlign(line: string, width: number): string {
+  if (!Number.isFinite(width) || width <= 0) return line;
+  const chars = Array.from(line);
+  if (chars.length >= width) return line;
+  return " ".repeat(Math.floor(width) - chars.length) + line;
+}
+
 type BadgeContext = {
   cwd: string;
   ui: {
     theme: { fg(color: "accent" | "dim", text: string): string };
-    setStatus(key: string, text: string | undefined): void;
+    setWidget(
+      key: string,
+      factory: (
+        tui: unknown,
+        theme: { fg(color: "accent" | "dim", text: string): string },
+      ) => { render(width: number): string[]; invalidate(): void },
+      options?: { placement?: "aboveEditor" | "belowEditor" },
+    ): void;
   };
-  getContextUsage(): { tokens?: number | null } | undefined;
+  getContextUsage(): { tokens?: number | null; contextWindow?: number; percent?: number | null } | undefined;
   sessionManager: { getEntries(): readonly unknown[] };
 };
 
-const COMPANION_STATUS_KEY = "companion";
+const COMPANION_USAGE_WIDGET = "companion-usage";
 
-function setCompanionBadge(ctx: BadgeContext, state: "idle" | "working"): void {
+function publishCompanionUsage(ctx: BadgeContext, state: "idle" | "working"): void {
   if (process.env[COMPANION_MARKER] !== "1") return;
   const agentDir = extensionAgentDir();
   const root = resolveProjectRoot(ctx.cwd);
@@ -926,13 +957,32 @@ function setCompanionBadge(ctx: BadgeContext, state: "idle" | "working"): void {
     aliases: readAliasMap(agentDir),
   });
   if (!resolved.ok) return;
-  const text = formatCompanionBadge({
-    state,
-    model: `${resolved.provider}/${resolved.model}:${resolved.effort}`,
-    entryCount: ctx.sessionManager.getEntries().length,
-    tokens: ctx.getContextUsage()?.tokens ?? undefined,
-  });
-  ctx.ui.setStatus(COMPANION_STATUS_KEY, ctx.ui.theme.fg(state === "working" ? "accent" : "dim", text));
+  const usage = ctx.getContextUsage();
+  const model = `${resolved.provider}/${resolved.model}:${resolved.effort}`;
+  const entryCount = ctx.sessionManager.getEntries().length;
+  ctx.ui.setWidget(
+    COMPANION_USAGE_WIDGET,
+    (_tui, theme) => ({
+      render(width: number): string[] {
+        const columns = Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
+        const line = formatCompanionBadge({
+          state,
+          // Below 40 columns the model is what has to go, or the band overflows.
+          model: columns < 40 ? "" : model,
+          entryCount,
+          tokens: usage?.tokens ?? undefined,
+          contextWindow: usage?.contextWindow,
+          percent: usage?.percent,
+          width: columns,
+        });
+        if (!line) return [];
+        // Padded before colouring: escape sequences would otherwise count toward the width.
+        return [theme.fg(state === "working" ? "accent" : "dim", rightAlign(line, columns))];
+      },
+      invalidate(): void {},
+    }),
+    { placement: "belowEditor" },
+  );
 }
 
 export default function companionExtension(pi: ExtensionAPI): void {
@@ -950,11 +1000,11 @@ export default function companionExtension(pi: ExtensionAPI): void {
     });
   }
 
-  pi.on("turn_start", (_event, ctx) => setCompanionBadge(ctx, "working"));
-  pi.on("turn_end", (_event, ctx) => setCompanionBadge(ctx, "idle"));
+  pi.on("turn_start", (_event, ctx) => publishCompanionUsage(ctx, "working"));
+  pi.on("turn_end", (_event, ctx) => publishCompanionUsage(ctx, "idle"));
 
   pi.on("session_start", async (_event, ctx) => {
-    setCompanionBadge(ctx, "idle");
+    publishCompanionUsage(ctx, "idle");
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";
