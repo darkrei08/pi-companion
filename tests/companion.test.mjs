@@ -10,9 +10,11 @@ import companionExtension, {
   autoOpenDecision,
   buildCompanionPaneCommand,
   buildCompanionPaneScript,
+  buildHostSnapshot,
   companionPaths,
   FALLBACK_MODEL,
   formatCompanionBadge,
+  formatHostSnapshot,
   formatTokenCount,
   manualPaneInstructions,
   mergeAliasMaps,
@@ -20,6 +22,7 @@ import companionExtension, {
   parseCompanionArgs,
   parseRole,
   readAutoOpenSetting,
+  readHostSnapshot,
   projectKey,
   readAliasMap,
   readOpenRecord,
@@ -30,6 +33,8 @@ import companionExtension, {
   shellQuote,
   shouldSkipAutoOpen,
   splitDirection,
+  temporarySessionPath,
+  writeHostSnapshot,
   writeOpenRecord,
 } from "../extensions/companion.ts";
 
@@ -94,6 +99,8 @@ test("companionPaths nests the project under the agent dir key", () => {
   assert.equal(paths.metaPath, join(paths.dir, "meta.json"));
   assert.equal(paths.launcherPath, join(paths.dir, "launcher.sh"));
   assert.equal(paths.openRecordPath, join(paths.dir, "open.json"));
+  assert.equal(paths.openLockPath, join(paths.dir, "open.lock"));
+  assert.equal(paths.snapshotPath, join(paths.dir, "host-snapshot.json"));
 });
 
 test("mergeAliasMaps keeps the first file's value on conflict", () => {
@@ -228,6 +235,9 @@ test("parseCompanionArgs maps every documented form", () => {
   assert.deepEqual(parseCompanionArgs("   "), { kind: "usage" });
   assert.deepEqual(parseCompanionArgs("status"), { kind: "status" });
   assert.deepEqual(parseCompanionArgs("open"), { kind: "open" });
+  assert.deepEqual(parseCompanionArgs("new"), { kind: "new" });
+  assert.deepEqual(parseCompanionArgs("close"), { kind: "close" });
+  assert.deepEqual(parseCompanionArgs("snapshot"), { kind: "snapshot" });
   assert.deepEqual(parseCompanionArgs("reset"), { kind: "reset" });
   assert.deepEqual(parseCompanionArgs("auto on"), { kind: "auto", value: true });
   assert.deepEqual(parseCompanionArgs("auto off"), { kind: "auto", value: false });
@@ -281,6 +291,7 @@ const PANE_INPUT = {
   model: "gemini-3.8-flash-high",
   effort: "medium",
   roleBody: "You are the companion chat.",
+  sessionPath: "/state/companion/key/session.jsonl",
 };
 
 test("buildCompanionPaneCommand runs the stable absolute launcher path", () => {
@@ -290,7 +301,7 @@ test("buildCompanionPaneCommand runs the stable absolute launcher path", () => {
 test("buildCompanionPaneScript marks the launched session as a companion", () => {
   assert.equal(
     buildCompanionPaneScript(PANE_INPUT),
-    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls,tool_search,dispatch_directive' \\\n  --append-system-prompt 'You are the companion chat.'\n",
+    "#!/bin/sh\nexport PI_COMPANION_SESSION=1\nexec '/usr/local/bin/pi' \\\n  --name 'companion' \\\n  --session '/state/companion/key/session.jsonl' \\\n  --no-mcp \\\n  --model 'cliproxyapi/gemini-3.8-flash-high:medium' \\\n  --tools 'read,grep,find,ls,dispatch_directive,host_snapshot' \\\n  --append-system-prompt 'You are the companion chat.'\n",
   );
 });
 
@@ -387,7 +398,7 @@ test("the launcher round-trips a hostile body through POSIX sh", () => {
     });
     execFileSync("sh", ["-n", launcher]);
     const output = execFileSync(launcher, { encoding: "utf8" });
-    assert.ok(output.includes("--name companion --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls,tool_search,dispatch_directive --append-system-prompt"));
+    assert.ok(output.includes("--name companion --session /state/companion/key/session.jsonl --no-mcp --model cliproxyapi/gemini-3.8-flash-high:medium --tools read,grep,find,ls,dispatch_directive,host_snapshot --append-system-prompt"));
     assert.ok(output.endsWith(`${body}\n`));
     assert.equal(statSync(launcher).mode & 0o777, 0o700);
   } finally {
@@ -395,10 +406,10 @@ test("the launcher round-trips a hostile body through POSIX sh", () => {
   }
 });
 
-test("readAutoOpenSetting defaults to on and respects an explicit false", () => {
+test("readAutoOpenSetting defaults to off and respects explicit true or false", () => {
   const dir = mkdtempSync(join(tmpdir(), "companion-auto-setting-"));
   try {
-    assert.equal(readAutoOpenSetting(dir), true);
+    assert.equal(readAutoOpenSetting(dir), false);
     mkdirSync(join(dir, "companion"));
     writeFileSync(join(dir, "companion", "settings.json"), JSON.stringify({ autoOpen: false }));
     assert.equal(readAutoOpenSetting(dir), false);
@@ -450,6 +461,14 @@ test("readOpenRecord returns undefined for a missing or malformed file", () => {
   }
 });
 
+test("temporarySessionPath creates a separate sortable transcript path", () => {
+  const paths = companionPaths("/agent", "/tmp/project");
+  assert.equal(
+    temporarySessionPath(paths, new Date("2026-11-08T10:11:12.123Z")),
+    join(paths.dir, "session-temporary-2026-11-08T10-11-12-123Z.jsonl"),
+  );
+});
+
 test("writeOpenRecord / readOpenRecord round-trips the record", () => {
   const dir = mkdtempSync(join(tmpdir(), "companion-open-record-"));
   try {
@@ -481,6 +500,11 @@ const OTHER_PANE = {
   cwd: PROJECT_ROOT,
   terminal_title_stripped: "\u03c0 - companion - project",
 };
+
+test("shouldSkipAutoOpen: an explicitly closed companion stays closed", () => {
+  const record = { sessionId: "sid-1", paneId: COMPANION_PANE.pane_id, timestamp: "t", state: "closed" };
+  assert.equal(shouldSkipAutoOpen("sid-1", record, [WORKING_PANE], WORKSPACE, PROJECT_ROOT), true);
+});
 
 test("shouldSkipAutoOpen: no record, no companion pane => open", () => {
   assert.equal(shouldSkipAutoOpen("sid-1", undefined, [WORKING_PANE], WORKSPACE, PROJECT_ROOT), false);
@@ -627,4 +651,95 @@ test("formatCompanionBadge leaves a line that fits the budget unchanged", () => 
   const expected = "tutor idle | m:x | 200 ctx | 1 entries";
   assert.equal(formatCompanionBadge(input), expected);
   assert.equal(formatCompanionBadge({ ...input, width: undefined }), expected);
+});
+
+test("buildHostSnapshot returns bounded follow-up context without environment data", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-1",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "working",
+    model: "cliproxyapi/model",
+    capturedAt: "2026-11-08T10:11:12.123Z",
+    entries: [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "  inspect\nthe queue\t now  " }] } },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", name: "read" },
+            { type: "text", text: "The queue is healthy." },
+          ],
+        },
+      },
+      { type: "custom", customType: "secret", data: { token: "do-not-copy" } },
+    ],
+  });
+
+  assert.deepEqual(snapshot, {
+    version: 1,
+    capturedAt: "2026-11-08T10:11:12.123Z",
+    sessionId: "sid-1",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "working",
+    model: "cliproxyapi/model",
+    entryCount: 3,
+    lastEntryType: "custom",
+    latestUser: "inspect the queue now",
+    latestAssistant: "The queue is healthy.",
+    recentTools: ["read"],
+  });
+  assert.match(formatHostSnapshot(snapshot), /latest assistant: The queue is healthy\./);
+  assert.doesNotMatch(formatHostSnapshot(snapshot), /do-not-copy/);
+});
+
+test("buildHostSnapshot redacts credential-like values", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "token=secret-value Authorization: Bearer bearer-value \"password\": \"hunter2\" sk-12345678901234567890" }],
+        },
+      },
+    ],
+  });
+  assert.equal(snapshot.latestUser, "token=[REDACTED] Authorization: [REDACTED] \"password\": [REDACTED] [REDACTED]");
+  assert.doesNotMatch(snapshot.latestUser, /secret-value|bearer-value|hunter2|sk-123/);
+});
+
+test("writeHostSnapshot / readHostSnapshot round-trips atomically", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "companion-snapshot-"));
+  const path = join(dir, "host-snapshot.json");
+  try {
+    const snapshot = buildHostSnapshot({
+      sessionId: "sid-2",
+      cwd: "/root/project",
+      projectKey: "abc123",
+      phase: "idle",
+      entries: [],
+      capturedAt: "2026-11-08T10:11:12.123Z",
+    });
+    writeHostSnapshot(path, snapshot);
+    assert.deepEqual(readHostSnapshot(path), snapshot);
+    assert.equal(existsSync(`${path}.${process.pid}.tmp`), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("host_snapshot is registered only inside a companion session", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: undefined }, async () => {
+    assert.equal(registeredExtension().tools.some((tool) => tool.name === "host_snapshot"), true);
+  });
+  await withEnv({ PI_COMPANION_SESSION: undefined, PI_COMPANION_CALLER_PANE: undefined }, async () => {
+    assert.equal(registeredExtension().tools.some((tool) => tool.name === "host_snapshot"), false);
+  });
 });

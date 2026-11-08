@@ -52,22 +52,25 @@ Resolution order, first hit wins:
 3. the `model:` line of `roles/companion.md`
 4. `cliproxyapi/gemini-3.8-flash-high:medium`
 
-Automatic pane opening is on by default. Set `~/.pi/agent/companion/settings.json` to
-`{"autoOpen": false}` or run `/companion auto off` to disable it; `/companion auto on`
-re-enables it. Auto-open runs only for interactive TUI sessions inside Herdr, never for
+Automatic pane opening is off by default. Run `/companion auto on` or set
+`~/.pi/agent/companion/settings.json` to `{"autoOpen": true}` to opt in; `/companion auto off`
+disables it again. Auto-open runs only for interactive TUI sessions inside Herdr, never for
 RPC, print, JSON, delegated child, workflow child, or companion sessions.
 
-Auto-open is idempotent per session, including across `/reload`: the pane it opened is
-recorded, so a reload never opens a second companion while that pane is alive. A pane you
-close by hand is reopened on the next reload.
+`/companion open` is idempotent: it reuses a live matching pane instead of opening a
+second one. `/companion close` records an intentional close, so opt-in auto-open does not
+immediately recreate it. A later explicit `/companion open` can open it again.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `/companion <question>` | Ask the tutor and post its answer into the transcript |
-| `/companion open` | Start the tutor as a real Pi session in a pane beside this one |
-| `/companion status` | Model, effort, which source it came from, transcript path, entries, bytes, project key |
+| `/companion open` | Open or reuse the persistent tutor pane |
+| `/companion new` | Open a temporary tutor with a fresh transcript; close the active tutor first |
+| `/companion close` | Close the active tutor pane without deleting its transcript |
+| `/companion snapshot` | Show a bounded snapshot of the current host session for follow-up |
+| `/companion status` | Model, lifecycle, pane, transcript path, entries, bytes, project key |
 | `/companion model <alias\|provider/model[:effort]>` | Validate a model and pin it for this project |
 | `/companion send <prompt>` | Ask the companion to dispatch a confirmed directive to its caller pane |
 | `/companion reset` | Archive the current transcript and start clean |
@@ -79,15 +82,19 @@ close by hand is reopened on the next reload.
 /companion open
 ```
 
-Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, its own persisted session file, `--name companion`, the read-only tools plus `tool_search` and `dispatch_directive`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down. A `session_start` handler performs the same open path automatically for eligible sessions, and the launcher sets `PI_COMPANION_SESSION=1` so the companion cannot recursively open another pane.
+Inside Herdr this splits the calling pane, keeps focus where it is, and starts a full interactive Pi session in the new pane. It is a sibling chat, not a sub-process: same working directory, an explicit `--session` path, `--name companion`, the read-only tools plus `host_snapshot` and `dispatch_directive`, the tutor contract as the appended system prompt, and the model and effort `/companion status` reports. The split follows the pane shape: a wide pane splits right, a tall one splits down. Auto-open is opt-in; when enabled, the `session_start` handler uses the same idempotent path. The launcher sets `PI_COMPANION_SESSION=1` so the companion cannot recursively open another pane.
 
-Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact `pi` command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
+Outside Herdr, or with no `herdr` binary on `PATH`, it prints the exact launcher command to run by hand plus one line saying why the pane was not opened. `/companion status` reports whether pane mode is available here.
+
+`/companion new` uses a separate `session-temporary-*.jsonl` transcript and refuses to create another pane while one is active. `/companion close` closes only the recorded companion pane and preserves its transcript.
 
 The companion pane also carries a usage band below the editor, right-aligned, showing the tutor state, the resolved model, the context tokens against the window with its percent, and the transcript entry count (`tutor idle | cliproxyapi/gemini-3.8-flash-high:medium | 12.3k/200k (6%) ctx | 7 entries`). It renders in a companion session only, because `ctx.getContextUsage()` reports the calling session's tokens.
 
 When the companion was launched from a caller pane, it also exposes `dispatch_directive` to the model. After the operator confirms the target, the tool collapses the directive to one line and types it into the caller's prompt with `herdr pane run`; it rejects control characters and directives longer than 1,000 characters.
 
-The companion also carries `tool_search`, so the MCP servers Pi knows about are reachable from that pane: naming tools with plain names replaces the whole selection, and without `tool_search` or `codemode` an MCP tool can never be called. `tool_search` declares a matching MCP tool for the next model call, so the tutor can consult codegraph or Engram inside the same read-only contract. `codemode` stays off on purpose: it would hand the tutor arbitrary script execution. A search can still surface MCP tools that write, such as the memory save tools; the role file tells the tutor to treat those as out of contract.
+The pane companion does not expose MCP discovery or arbitrary script execution. This keeps the read-only boundary enforceable instead of relying on the model to avoid write-capable tools. The companion can still inspect the repository through `read`, `grep`, `find`, `ls`, and the bounded `host_snapshot` tool.
+
+`/companion snapshot` is deliberately bounded and on demand. It shows the host session id, project, phase, model, entry count, latest bounded user and assistant messages, and recent tool names. It does not dump environment variables, credentials, or unrestricted terminal history. The pane companion can request the same cached snapshot through its read-only `host_snapshot` tool.
 
 ## Which chat for which prompt
 
@@ -119,7 +126,9 @@ The companion cannot write, and that is not a limitation to route around: when i
 ├── session.jsonl   # the tutor transcript, one per project root
 ├── meta.json       # the model pinned for this project
 ├── launcher.sh     # reusable pane launcher, including the recursion guard
-└── open.json       # the pane auto-open already opened for this session
+├── open.json       # active or intentionally closed companion lifecycle record
+├── open.lock       # short-lived atomic pane-open claim
+└── host-snapshot.json # bounded snapshot exposed to the companion
 ```
 
 `<project-key>` is the first 16 hex characters of the SHA-256 of the resolved project root, so two clones of the same repo do not share a tutor.
@@ -127,8 +136,9 @@ The companion cannot write, and that is not a limitation to route around: when i
 ## Verification
 
 ```sh
-node --test tests/*.test.mjs   # decision matrix, marker guard, and pane helpers
+node --test tests/*.test.mjs   # lifecycle, snapshot, decision matrix, and pane helpers
 npm run typecheck              # needs typescript, declared as a devDependency
+npm pack --dry-run             # verify the published file set
 ```
 
 Live check against a real model:

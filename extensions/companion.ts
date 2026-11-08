@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { X_OK } from "node:constants";
 import { createHash } from "node:crypto";
 import {
   accessSync,
@@ -9,8 +10,8 @@ import {
   realpathSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
-  X_OK,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -26,7 +27,7 @@ import type { TSchema } from "typebox";
 export const COMPANION_MESSAGE_TYPE = "companion";
 export const COMPANION_MARKER = "PI_COMPANION_SESSION";
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "tool_search", "dispatch_directive"] as const;
+const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "dispatch_directive", "host_snapshot"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
 export const MAX_DIRECTIVE_LENGTH = 1000;
 const COMPANION_PANE_NAME = "companion";
@@ -39,6 +40,7 @@ const DISPATCH_PARAMETERS = {
   required: ["prompt", "reason"],
   additionalProperties: false,
 } as TSchema;
+const HOST_SNAPSHOT_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as TSchema;
 
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -47,7 +49,10 @@ const DEFAULT_EFFORT: Effort = "medium";
 export const USAGE = [
   "companion usage",
   "/companion <question>                            ask the read-only tutor about this project",
-  "/companion open                                  open the tutor as a Pi session in a pane beside this one",
+  "/companion open                                  open or reuse the persistent tutor pane",
+  "/companion new                                   open a temporary tutor with a fresh transcript",
+  "/companion close                                 close the active tutor pane without deleting history",
+  "/companion snapshot                              show a bounded snapshot of this host session",
   "/companion status                                show model, effort, transcript size and project key",
   "/companion model <alias|provider/model[:effort]> set this project's model",
   "/companion send <prompt>                         ask the companion to dispatch a directive to its caller",
@@ -64,6 +69,9 @@ export type ResolvedModel =
 export type ParsedCommand =
   | { kind: "usage" }
   | { kind: "open" }
+  | { kind: "new" }
+  | { kind: "close" }
+  | { kind: "snapshot" }
   | { kind: "status" }
   | { kind: "reset" }
   | { kind: "auto"; value: boolean }
@@ -78,6 +86,9 @@ export function parseCompanionArgs(args: string): ParsedCommand {
   const text = args.trim();
   if (!text) return { kind: "usage" };
   if (text === "open") return { kind: "open" };
+  if (text === "new") return { kind: "new" };
+  if (text === "close") return { kind: "close" };
+  if (text === "snapshot") return { kind: "snapshot" };
   if (text === "status") return { kind: "status" };
   if (text === "reset") return { kind: "reset" };
   if (text === "auto on") return { kind: "auto", value: true };
@@ -210,7 +221,7 @@ export function readExtensionModel(agentDir: string): string | undefined {
 }
 
 export function readAutoOpenSetting(agentDir: string): boolean {
-  return readJsonObject(companionSettingsPath(agentDir))?.autoOpen !== false;
+  return readJsonObject(companionSettingsPath(agentDir))?.autoOpen === true;
 }
 
 export function parseRole(markdown: string): { model?: string; body: string } {
@@ -240,6 +251,8 @@ export type CompanionPaths = {
   metaPath: string;
   launcherPath: string;
   openRecordPath: string;
+  openLockPath: string;
+  snapshotPath: string;
 };
 
 export function companionPaths(agentDir: string, root: string): CompanionPaths {
@@ -252,22 +265,47 @@ export function companionPaths(agentDir: string, root: string): CompanionPaths {
     metaPath: join(dir, "meta.json"),
     launcherPath: join(dir, "launcher.sh"),
     openRecordPath: join(dir, "open.json"),
+    openLockPath: join(dir, "open.lock"),
+    snapshotPath: join(dir, "host-snapshot.json"),
   };
 }
 
-export type OpenRecord = { sessionId: string; paneId: string; timestamp: string };
+export type OpenRecord = {
+  sessionId: string;
+  paneId: string;
+  timestamp: string;
+  sessionPath?: string;
+  kind?: "canonical" | "temporary";
+  state?: "open" | "closed";
+  closedAt?: string;
+};
 
 export function readOpenRecord(recordPath: string): OpenRecord | undefined {
   const raw = readJsonObject(recordPath);
   if (!raw) return undefined;
   if (typeof raw.sessionId !== "string" || typeof raw.paneId !== "string" || typeof raw.timestamp !== "string")
     return undefined;
-  return { sessionId: raw.sessionId, paneId: raw.paneId, timestamp: raw.timestamp };
+  return {
+    sessionId: raw.sessionId,
+    paneId: raw.paneId,
+    timestamp: raw.timestamp,
+    ...(typeof raw.sessionPath === "string" ? { sessionPath: raw.sessionPath } : {}),
+    ...(raw.kind === "canonical" || raw.kind === "temporary" ? { kind: raw.kind } : {}),
+    ...(raw.state === "open" || raw.state === "closed" ? { state: raw.state } : {}),
+    ...(typeof raw.closedAt === "string" ? { closedAt: raw.closedAt } : {}),
+  };
 }
 
 export function writeOpenRecord(recordPath: string, record: OpenRecord): void {
-  mkdirSync(dirname(recordPath), { recursive: true });
-  writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  mkdirSync(dirname(recordPath), { recursive: true, mode: 0o700 });
+  const temporary = `${recordPath}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, recordPath);
+}
+
+export function temporarySessionPath(paths: CompanionPaths, now: Date): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  return join(paths.dir, `session-temporary-${stamp}.jsonl`);
 }
 
 export type HerdrPane = { pane_id: string; workspace_id?: string; cwd?: string; terminal_title_stripped?: string };
@@ -306,6 +344,8 @@ export function shouldSkipAutoOpen(
   workspaceId: string,
   projectRoot: string,
 ): boolean {
+  if (record?.state === "closed") return true;
+
   const paneIds = new Set(panes.map((p) => p.pane_id));
 
   // (a) persisted record for this session with pane still alive
@@ -361,6 +401,7 @@ export function buildCompanionPaneScript(input: {
   model: string;
   effort: Effort;
   roleBody: string;
+  sessionPath: string;
   callerPaneId?: string;
 }): string {
   return [
@@ -369,7 +410,7 @@ export function buildCompanionPaneScript(input: {
     ...(input.callerPaneId?.trim()
       ? [`export PI_COMPANION_CALLER_PANE=${shellQuote(input.callerPaneId.trim())}`]
       : []),
-    `exec ${shellQuote(input.piPath)} \\\n  --name ${shellQuote("companion")} \\\n  --model ${shellQuote(`${input.provider}/${input.model}:${input.effort}`)} \\\n  --tools ${shellQuote(COMPANION_PANE_TOOLS.join(","))} \\\n  --append-system-prompt ${shellQuote(input.roleBody)}`,
+    `exec ${shellQuote(input.piPath)} \\\n  --name ${shellQuote("companion")} \\\n  --session ${shellQuote(input.sessionPath)} \\\n  --no-mcp \\\n  --model ${shellQuote(`${input.provider}/${input.model}:${input.effort}`)} \\\n  --tools ${shellQuote(COMPANION_PANE_TOOLS.join(","))} \\\n  --append-system-prompt ${shellQuote(input.roleBody)}`,
     "",
   ].join("\n");
 }
@@ -527,7 +568,7 @@ function jsonField(value: unknown, ...path: string[]): unknown {
   return current;
 }
 
-function post(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string): void {
+function post(pi: ExtensionAPI, ctx: Pick<ExtensionCommandContext, "hasUI">, text: string): void {
   pi.sendMessage({ customType: COMPANION_MESSAGE_TYPE, content: text, display: true });
   // Print mode only emits the final assistant message, so command output must go to stdout there.
   if (!ctx.hasUI) console.log(text);
@@ -647,7 +688,9 @@ type CompanionState = {
   effort: Effort;
 };
 
-function loadCompanionState(ctx: ExtensionCommandContext): CompanionState {
+function loadCompanionState(
+  ctx: Pick<ExtensionCommandContext, "cwd" | "modelRegistry">,
+): CompanionState {
   const agentDir = extensionAgentDir();
   const root = resolveProjectRoot(ctx.cwd);
   const paths = companionPaths(agentDir, root);
@@ -676,65 +719,286 @@ function loadCompanionState(ctx: ExtensionCommandContext): CompanionState {
   };
 }
 
-async function openCompanionPane(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+type CompanionOpenOptions = {
+  kind?: "canonical" | "temporary";
+  autoOpen?: boolean;
+};
+
+function acquireOpenLock(lockPath: string): boolean {
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(lockPath, `${process.pid}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    try {
+      const owner = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+      if (Number.isInteger(owner) && owner > 0) {
+        try {
+          process.kill(owner, 0);
+          return false;
+        } catch (probeError) {
+          if ((probeError as NodeJS.ErrnoException).code !== "ESRCH") return false;
+        }
+        unlinkSync(lockPath);
+        return acquireOpenLock(lockPath);
+      }
+    } catch {
+      // An unreadable lock is treated as owned; fail closed rather than racing it.
+    }
+    return false;
+  }
+}
+
+function releaseOpenLock(lockPath: string): void {
+  try {
+    unlinkSync(lockPath);
+  } catch {
+    // The lock may have been reclaimed after a stale process died.
+  }
+}
+
+async function paneProbe(paneId: string): Promise<"live" | "gone" | "unknown"> {
+  const result = await exec("herdr", ["pane", "get", paneId]);
+  if (result.code === 0) {
+    const parsed = parseJsonText(result.stdout);
+    return typeof jsonField(parsed, "result", "pane", "pane_id") === "string" ? "live" : "unknown";
+  }
+  const error = parseJsonText(result.stdout || result.stderr);
+  return jsonField(error, "error", "code") === "pane_not_found" ? "gone" : "unknown";
+}
+
+function parseHerdrPanes(result: ExecResult): HerdrPane[] {
+  if (result.code !== 0) throw new Error(`herdr pane list failed: ${errorLine(result.stderr || result.stdout || "no response")}`);
+  const parsed = parseJsonText(result.stdout);
+  const items = jsonField(parsed, "result", "panes");
+  if (!Array.isArray(items)) throw new Error("herdr pane list returned invalid JSON");
+  const panes: HerdrPane[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || typeof (item as Record<string, unknown>).pane_id !== "string") {
+      throw new Error("herdr pane list returned an invalid pane");
+    }
+    panes.push(item as HerdrPane);
+  }
+  return panes;
+}
+
+async function findLiveCompanionPane(
+  state: CompanionState,
+  options: { allowFallback?: boolean } = {},
+): Promise<{ paneId?: string; workspaceId?: string; panes: HerdrPane[] }> {
+  const [paneListResult, layoutResult] = await Promise.all([
+    exec("herdr", ["pane", "list"]),
+    exec("herdr", ["pane", "layout", "--current"]),
+  ]);
+  const panes = parseHerdrPanes(paneListResult);
+  if (layoutResult.code !== 0) {
+    throw new Error(`herdr pane layout failed: ${errorLine(layoutResult.stderr || layoutResult.stdout || "no response")}`);
+  }
+  const layout = parseJsonText(layoutResult.stdout);
+  const workspaceId = jsonField(layout, "result", "layout", "workspace_id") as string | undefined;
+  if (!workspaceId) throw new Error("herdr pane layout returned invalid JSON");
+  const record = readOpenRecord(state.paths.openRecordPath);
+  const paneIds = new Set(panes.map((pane) => pane.pane_id));
+  if (record) {
+    if (paneIds.has(record.paneId)) return { paneId: record.paneId, workspaceId, panes };
+    const probe = await paneProbe(record.paneId);
+    if (probe === "live") return { paneId: record.paneId, workspaceId, panes };
+    if (probe === "unknown") throw new Error(`cannot determine whether companion pane ${record.paneId} is alive`);
+  }
+  const fallback = options.allowFallback === false
+    ? undefined
+    : panes.find((pane) => isCompanionPane(pane, workspaceId, state.root));
+  return { paneId: fallback?.pane_id, workspaceId, panes };
+}
+
+async function reconcileUnknownSplit(
+  state: CompanionState,
+  beforePanes: HerdrPane[],
+  workspaceId: string | undefined,
+): Promise<string> {
+  if (!workspaceId) return "orphan pane identity is unknown; inspect Herdr manually";
+  const [paneListResult, layoutResult] = await Promise.all([
+    exec("herdr", ["pane", "list"]),
+    exec("herdr", ["pane", "layout", "--current"]),
+  ]);
+  const panes = parseHerdrPanes(paneListResult);
+  if (layoutResult.code !== 0) return "orphan pane cleanup could not verify the workspace";
+  const layout = parseJsonText(layoutResult.stdout);
+  const currentWorkspace = jsonField(layout, "result", "layout", "workspace_id");
+  if (currentWorkspace !== workspaceId) return "orphan pane cleanup found a changed workspace";
+  const beforeIds = new Set(beforePanes.map((pane) => pane.pane_id));
+  const candidates = panes.filter(
+    (pane) => !beforeIds.has(pane.pane_id) && pane.workspace_id === workspaceId && pane.cwd === state.root,
+  );
+  if (candidates.length !== 1) return `orphan pane cleanup found ${candidates.length} untracked candidates`;
+  const cleanup = await exec("herdr", ["pane", "close", candidates[0].pane_id]);
+  return cleanup.code === 0
+    ? `orphan pane ${candidates[0].pane_id} closed`
+    : `orphan cleanup failed: ${errorLine(cleanup.stderr || cleanup.stdout || "no response")}`;
+}
+
+async function openCompanionPane(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionCommandContext, "cwd" | "hasUI" | "sessionManager" | "modelRegistry">,
+  options: CompanionOpenOptions = {},
+): Promise<void> {
   if (process.env[COMPANION_MARKER] === "1") throw new Error("current session is already the companion");
 
   const state = loadCompanionState(ctx);
-  writeCompanionPaneScript(
-    state.paths,
-    buildCompanionPaneScript({
-      piPath: resolvePiExecutable(),
-      provider: state.provider,
-      model: state.model,
-      effort: state.effort,
-      roleBody: state.roleBody,
-      callerPaneId: process.env.HERDR_PANE_ID?.trim(),
-    }),
-  );
-  const command = buildCompanionPaneCommand(state.paths.launcherPath);
-
-  const herdrFound = (await exec("herdr", ["--version"])).code === 0;
-  const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
-  if (!availability.ok) {
-    post(pi, ctx, manualPaneInstructions(command, availability.reason));
+  if (!acquireOpenLock(state.paths.openLockPath)) {
+    post(pi, ctx, "companion: another pane open is already in progress");
     return;
   }
 
-  const layout = parseJsonText((await exec("herdr", ["pane", "layout", "--current"])).stdout);
-  const width = jsonField(layout, "result", "layout", "area", "width");
-  const height = jsonField(layout, "result", "layout", "area", "height");
-  const direction =
-    typeof width === "number" && typeof height === "number"
-      ? splitDirection({ width, height })
-      : "right";
+  try {
+    const kind = options.kind ?? "canonical";
+    const sessionPath = kind === "temporary" ? temporarySessionPath(state.paths, new Date()) : state.paths.sessionPath;
+    const record = readOpenRecord(state.paths.openRecordPath);
+    if (options.autoOpen && record?.state === "closed") return;
+    const command = buildCompanionPaneCommand(state.paths.launcherPath);
 
-  const split = await exec("herdr", [
-    "pane",
-    "split",
-    "--current",
-    "--direction",
-    direction,
-    "--cwd",
-    state.root,
-    "--no-focus",
-  ]);
-  const paneId = jsonField(parseJsonText(split.stdout), "result", "pane", "pane_id");
-  if (split.code !== 0 || typeof paneId !== "string" || !paneId) {
-    throw new Error(`herdr pane split failed: ${errorLine(split.stderr || split.stdout || "no response")}`);
-  }
+    const herdrFound = (await exec("herdr", ["--version"])).code === 0;
+    const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
+    if (!availability.ok) {
+      writeCompanionPaneScript(
+        state.paths,
+        buildCompanionPaneScript({
+          piPath: resolvePiExecutable(),
+          provider: state.provider,
+          model: state.model,
+          effort: state.effort,
+          roleBody: state.roleBody,
+          sessionPath,
+          callerPaneId: process.env.HERDR_PANE_ID?.trim(),
+        }),
+      );
+      post(pi, ctx, manualPaneInstructions(command, availability.reason));
+      return;
+    }
 
-  const run = await exec("herdr", ["pane", "run", paneId, command]);
-  if (run.code !== 0) {
-    throw new Error(
-      `pane ${paneId} created but pi did not start: ${errorLine(run.stderr || run.stdout || "no response")}`,
+    const live = await findLiveCompanionPane(state);
+    if (live.paneId) {
+      if (kind === "temporary") {
+        post(pi, ctx, `companion: pane ${live.paneId} is already open; close it before starting a new tutor`);
+      } else {
+        post(pi, ctx, `companion already open in pane ${live.paneId}`);
+      }
+      return;
+    }
+
+    writeCompanionPaneScript(
+      state.paths,
+      buildCompanionPaneScript({
+        piPath: resolvePiExecutable(),
+        provider: state.provider,
+        model: state.model,
+        effort: state.effort,
+        roleBody: state.roleBody,
+        sessionPath,
+        callerPaneId: process.env.HERDR_PANE_ID?.trim(),
+      }),
     );
+
+    const layout = parseJsonText((await exec("herdr", ["pane", "layout", "--current"])).stdout);
+    const width = jsonField(layout, "result", "layout", "area", "width");
+    const height = jsonField(layout, "result", "layout", "area", "height");
+    const direction =
+      typeof width === "number" && typeof height === "number"
+        ? splitDirection({ width, height })
+        : "right";
+
+    const split = await exec("herdr", [
+      "pane",
+      "split",
+      "--current",
+      "--direction",
+      direction,
+      "--cwd",
+      state.root,
+      "--no-focus",
+    ]);
+    const paneId = jsonField(parseJsonText(split.stdout), "result", "pane", "pane_id");
+    if (split.code !== 0 || typeof paneId !== "string" || !paneId) {
+      let cleanup = "orphan cleanup not attempted";
+      try {
+        cleanup = await reconcileUnknownSplit(state, live.panes, live.workspaceId);
+      } catch (error) {
+        cleanup = `orphan cleanup failed: ${errorLine(error)}`;
+      }
+      throw new Error(`herdr pane split failed: ${errorLine(split.stderr || split.stdout || "no response")}; ${cleanup}`);
+    }
+
+    const run = await exec("herdr", ["pane", "run", paneId, command]);
+    if (run.code !== 0) {
+      const cleanup = await exec("herdr", ["pane", "close", paneId]);
+      const cleanupMessage = cleanup.code === 0 ? "; orphan pane closed" : `; cleanup failed: ${errorLine(cleanup.stderr || cleanup.stdout || "no response")}`;
+      throw new Error(
+        `pane ${paneId} created but pi did not start: ${errorLine(run.stderr || run.stdout || "no response")}${cleanupMessage}`,
+      );
+    }
+    try {
+      writeOpenRecord(state.paths.openRecordPath, {
+        sessionId: ctx.sessionManager.getSessionId(),
+        paneId,
+        timestamp: new Date().toISOString(),
+        sessionPath,
+        kind,
+        state: "open",
+      });
+    } catch (error) {
+      const cleanup = await exec("herdr", ["pane", "close", paneId]);
+      const cleanupMessage = cleanup.code === 0 ? "; orphan pane closed" : `; cleanup failed: ${errorLine(cleanup.stderr || cleanup.stdout || "no response")}`;
+      throw new Error(`companion state write failed: ${errorLine(error)}${cleanupMessage}`);
+    }
+    post(pi, ctx, `companion opened in pane ${paneId}\nlauncher: ${state.paths.launcherPath}`);
+  } finally {
+    releaseOpenLock(state.paths.openLockPath);
   }
-  writeOpenRecord(state.paths.openRecordPath, {
-    sessionId: ctx.sessionManager.getSessionId(),
-    paneId,
-    timestamp: new Date().toISOString(),
-  });
-  post(pi, ctx, `companion opened in pane ${paneId}\nlauncher: ${state.paths.launcherPath}`);
+}
+
+async function closeCompanionPane(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionCommandContext, "cwd" | "hasUI" | "sessionManager" | "modelRegistry">,
+): Promise<void> {
+  if (process.env[COMPANION_MARKER] === "1") throw new Error("the companion pane cannot close itself");
+  const state = loadCompanionState(ctx);
+  if (!acquireOpenLock(state.paths.openLockPath)) {
+    post(pi, ctx, "companion: another pane lifecycle operation is already in progress");
+    return;
+  }
+
+  try {
+    const record = readOpenRecord(state.paths.openRecordPath);
+    if (!record || record.state === "closed") {
+      post(pi, ctx, "companion: no active pane");
+      return;
+    }
+
+    const herdrFound = (await exec("herdr", ["--version"])).code === 0;
+    const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
+    if (!availability.ok) {
+      post(pi, ctx, `companion: cannot close pane: ${availability.reason}`);
+      return;
+    }
+
+    const live = await findLiveCompanionPane(state, { allowFallback: false });
+    const now = new Date().toISOString();
+    if (!live.paneId) {
+      writeOpenRecord(state.paths.openRecordPath, { ...record, state: "closed", closedAt: now });
+      post(pi, ctx, "companion: active pane was already gone; state marked closed");
+      return;
+    }
+
+    const result = await exec("herdr", ["pane", "close", live.paneId]);
+    if (result.code !== 0) {
+      throw new Error(`herdr pane close failed: ${errorLine(result.stderr || result.stdout || "no response")}`);
+    }
+    writeOpenRecord(state.paths.openRecordPath, { ...record, paneId: live.paneId, state: "closed", closedAt: now });
+    post(pi, ctx, `companion closed in pane ${live.paneId}; transcript preserved`);
+  } finally {
+    releaseOpenLock(state.paths.openLockPath);
+  }
 }
 
 async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -754,7 +1018,9 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
     return;
   }
 
-  const entries = await countTranscriptEntries(paths.sessionPath, root);
+  const record = readOpenRecord(paths.openRecordPath);
+  const transcriptPath = record?.sessionPath ?? paths.sessionPath;
+  const entries = await countTranscriptEntries(transcriptPath, root);
   const herdrFound = (await exec("herdr", ["--version"])).code === 0;
   const availability = paneAvailability(process.env.HERDR_ENV, herdrFound);
   post(
@@ -766,9 +1032,11 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
       `effort: ${resolved.effort}`,
       `model source: ${resolved.source}${resolved.alias ? ` (alias ${resolved.alias})` : ""}`,
       `pane mode: ${availability.ok ? "available" : `unavailable (${availability.reason})`}`,
-      `transcript: ${paths.sessionPath}`,
+      `lifecycle: ${record ? record.state ?? "open" : "absent"}${record?.kind ? ` (${record.kind})` : ""}`,
+      `pane: ${record?.paneId ?? "none"}`,
+      `transcript: ${transcriptPath}`,
       `transcript entries: ${entries}`,
-      `transcript bytes: ${fileBytes(paths.sessionPath)}`,
+      `transcript bytes: ${fileBytes(transcriptPath)}`,
       `project key: ${paths.key}`,
       `project root: ${root}`,
     ].join("\n"),
@@ -838,6 +1106,178 @@ function resetCompanion(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   post(pi, ctx, `companion transcript archived: ${archived}\nnext question starts a fresh transcript`);
 }
 
+export type HostSnapshot = {
+  version: 1;
+  capturedAt: string;
+  sessionId: string;
+  cwd: string;
+  projectKey: string;
+  phase: "idle" | "working";
+  model?: string;
+  entryCount: number;
+  lastEntryType?: string;
+  latestUser?: string;
+  latestAssistant?: string;
+  recentTools: string[];
+};
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function boundedSnapshotText(value: string, limit = 600): string {
+  const normalized = value
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/((?:"?(?:api[_-]?key|token|secret|password|passwd|authorization)"?)\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[REDACTED]")
+    .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/gu, "[REDACTED]");
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
+}
+
+function contentText(content: unknown): string | undefined {
+  if (typeof content === "string") return boundedSnapshotText(content);
+  if (!Array.isArray(content)) return undefined;
+  let text = "";
+  for (const block of content) {
+    const value = recordValue(block);
+    if (value?.type !== "text" || typeof value.text !== "string") continue;
+    text = boundedSnapshotText(`${text} ${value.text}`);
+    if (text.length >= 600) break;
+  }
+  return text || undefined;
+}
+
+export function buildHostSnapshot(input: {
+  sessionId: string;
+  cwd: string;
+  projectKey: string;
+  phase: "idle" | "working";
+  model?: string;
+  entries: readonly unknown[];
+  capturedAt?: string;
+}): HostSnapshot {
+  let latestUser: string | undefined;
+  let latestAssistant: string | undefined;
+  let lastEntryType: string | undefined;
+  const recentTools: string[] = [];
+  const entries = input.entries.slice(Math.max(0, input.entries.length - 200));
+
+  for (const rawEntry of entries) {
+    const entry = recordValue(rawEntry);
+    if (!entry) continue;
+    lastEntryType = typeof entry.type === "string" ? entry.type : lastEntryType;
+    if (entry.type !== "message") continue;
+    const message = recordValue(entry.message);
+    if (!message) continue;
+    const text = contentText(message.content);
+    if (message.role === "user" && text) latestUser = boundedSnapshotText(text);
+    if (message.role === "assistant" && text) latestAssistant = boundedSnapshotText(text);
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const block of message.content) {
+        const value = recordValue(block);
+        const name =
+          value?.type === "toolCall" && typeof value.name === "string"
+            ? value.name
+            : value?.type === "tool_use" && typeof value.name === "string"
+              ? value.name
+              : undefined;
+        if (name && recentTools[recentTools.length - 1] !== name && recentTools.length < 10) recentTools.push(name);
+      }
+    }
+  }
+
+  return {
+    version: 1,
+    capturedAt: input.capturedAt ?? new Date().toISOString(),
+    sessionId: input.sessionId,
+    cwd: input.cwd,
+    projectKey: input.projectKey,
+    phase: input.phase,
+    ...(input.model ? { model: input.model } : {}),
+    entryCount: input.entries.length,
+    ...(lastEntryType ? { lastEntryType } : {}),
+    ...(latestUser ? { latestUser } : {}),
+    ...(latestAssistant ? { latestAssistant } : {}),
+    recentTools: recentTools.slice(-5),
+  };
+}
+
+export function formatHostSnapshot(snapshot: HostSnapshot): string {
+  return [
+    "companion snapshot",
+    `captured: ${snapshot.capturedAt}`,
+    `session: ${snapshot.sessionId}`,
+    `project: ${snapshot.cwd} (${snapshot.projectKey})`,
+    `phase: ${snapshot.phase}`,
+    ...(snapshot.model ? [`model: ${snapshot.model}`] : []),
+    `entries: ${snapshot.entryCount}${snapshot.lastEntryType ? ` (last: ${snapshot.lastEntryType})` : ""}`,
+    ...(snapshot.recentTools.length ? [`recent tools: ${snapshot.recentTools.join(", ")}`] : []),
+    ...(snapshot.latestUser ? [`latest user: ${snapshot.latestUser}`] : []),
+    ...(snapshot.latestAssistant ? [`latest assistant: ${snapshot.latestAssistant}`] : []),
+  ].join("\n");
+}
+
+export function writeHostSnapshot(path: string, snapshot: HostSnapshot): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+export function readHostSnapshot(path: string): HostSnapshot | undefined {
+  const raw = readJsonObject(path);
+  if (!raw || raw.version !== 1 || typeof raw.capturedAt !== "string" || typeof raw.sessionId !== "string") {
+    return undefined;
+  }
+  if (typeof raw.cwd !== "string" || typeof raw.projectKey !== "string") return undefined;
+  const phase = raw.phase === "working" ? "working" : raw.phase === "idle" ? "idle" : undefined;
+  if (!phase || typeof raw.entryCount !== "number" || !Number.isFinite(raw.entryCount)) return undefined;
+  const recentTools = Array.isArray(raw.recentTools)
+    ? raw.recentTools.filter((value): value is string => typeof value === "string").slice(-5)
+    : [];
+  return {
+    version: 1,
+    capturedAt: raw.capturedAt,
+    sessionId: raw.sessionId,
+    cwd: raw.cwd,
+    projectKey: raw.projectKey,
+    phase,
+    ...(typeof raw.model === "string" ? { model: boundedSnapshotText(raw.model, 160) } : {}),
+    entryCount: Math.max(0, Math.floor(raw.entryCount)),
+    ...(typeof raw.lastEntryType === "string" ? { lastEntryType: boundedSnapshotText(raw.lastEntryType, 80) } : {}),
+    ...(typeof raw.latestUser === "string" ? { latestUser: boundedSnapshotText(raw.latestUser) } : {}),
+    ...(typeof raw.latestAssistant === "string" ? { latestAssistant: boundedSnapshotText(raw.latestAssistant) } : {}),
+    recentTools,
+  };
+}
+
+type HostSnapshotContext = {
+  cwd: string;
+  model?: { provider: string; id: string };
+  sessionManager: { getSessionId(): string; getEntries(): readonly unknown[] };
+};
+
+function publishHostSnapshot(ctx: HostSnapshotContext, phase: "idle" | "working"): HostSnapshot | undefined {
+  if (process.env[COMPANION_MARKER] === "1") return undefined;
+  const snapshot = buildHostSnapshot({
+    sessionId: ctx.sessionManager.getSessionId(),
+    cwd: ctx.cwd,
+    projectKey: projectKey(ctx.cwd),
+    phase,
+    model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+    entries: ctx.sessionManager.getEntries(),
+  });
+  writeHostSnapshot(companionPaths(extensionAgentDir(), resolveProjectRoot(ctx.cwd)).snapshotPath, snapshot);
+  return snapshot;
+}
+
+function hostSnapshotToolResult(cwd: string): DispatchResult {
+  const snapshot = readHostSnapshot(companionPaths(extensionAgentDir(), resolveProjectRoot(cwd)).snapshotPath);
+  if (!snapshot) return dispatchFailure("Host snapshot is unavailable; ask the working chat for /companion snapshot.");
+  return { content: [{ type: "text", text: formatHostSnapshot(snapshot) }], details: {} };
+}
+
 async function handleCompanion(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -849,6 +1289,17 @@ async function handleCompanion(
       case "open":
         await openCompanionPane(pi, ctx);
         return;
+      case "new":
+        await openCompanionPane(pi, ctx, { kind: "temporary" });
+        return;
+      case "close":
+        await closeCompanionPane(pi, ctx);
+        return;
+      case "snapshot": {
+        const snapshot = publishHostSnapshot(ctx, ctx.isIdle() ? "idle" : "working");
+        post(pi, ctx, snapshot ? formatHostSnapshot(snapshot) : "companion: host snapshot is unavailable in this session");
+        return;
+      }
       case "status":
         await showStatus(pi, ctx);
         return;
@@ -987,6 +1438,15 @@ function publishCompanionUsage(ctx: BadgeContext, state: "idle" | "working"): vo
 
 export default function companionExtension(pi: ExtensionAPI): void {
   const callerPaneId = process.env.PI_COMPANION_CALLER_PANE?.trim();
+  if (process.env[COMPANION_MARKER] === "1") {
+    pi.registerTool({
+      name: "host_snapshot",
+      label: "Host snapshot",
+      description: "Read the latest bounded snapshot published by the working Pi session.",
+      parameters: HOST_SNAPSHOT_PARAMETERS,
+      execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => hostSnapshotToolResult(ctx.cwd),
+    });
+  }
   if (process.env[COMPANION_MARKER] === "1" && callerPaneId) {
     pi.registerTool({
       name: "dispatch_directive",
@@ -1000,11 +1460,18 @@ export default function companionExtension(pi: ExtensionAPI): void {
     });
   }
 
-  pi.on("turn_start", (_event, ctx) => publishCompanionUsage(ctx, "working"));
-  pi.on("turn_end", (_event, ctx) => publishCompanionUsage(ctx, "idle"));
+  pi.on("turn_start", (_event, ctx) => {
+    publishCompanionUsage(ctx, "working");
+    publishHostSnapshot(ctx, "working");
+  });
+  pi.on("turn_end", (_event, ctx) => {
+    publishCompanionUsage(ctx, "idle");
+    publishHostSnapshot(ctx, "idle");
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     publishCompanionUsage(ctx, "idle");
+    publishHostSnapshot(ctx, "idle");
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";
@@ -1022,32 +1489,15 @@ export default function companionExtension(pi: ExtensionAPI): void {
     const decision = autoOpenDecision(interactive, herdrOk, autoOpenSetting, companionMarker, workflowChild);
     if (!decision.open) return;
 
-    // Fetch the live pane list and current workspace; pass to the pure guard.
-    const root = resolveProjectRoot(ctx.cwd);
-    const paths = companionPaths(agentDir, root);
-    const [paneListResult, layoutResult] = await Promise.all([
-      exec("herdr", ["pane", "list"]),
-      exec("herdr", ["pane", "layout", "--current"]),
-    ]);
-    const paneList: HerdrPane[] = (() => {
-      const parsed = parseJsonText(paneListResult.stdout);
-      const items = jsonField(parsed, "result", "panes");
-      return Array.isArray(items) ? (items as HerdrPane[]) : [];
-    })();
-    const layout = parseJsonText(layoutResult.stdout);
-    const workspaceId = jsonField(layout, "result", "layout", "workspace_id") as string | undefined;
-    const record = readOpenRecord(paths.openRecordPath);
-    if (shouldSkipAutoOpen(ctx.sessionManager.getSessionId(), record, paneList, workspaceId ?? "", root)) return;
-
     try {
-      await openCompanionPane(pi, ctx);
+      await openCompanionPane(pi, ctx, { autoOpen: true });
     } catch (error) {
       post(pi, ctx, `companion: auto-open failed: ${errorLine(error)}`);
     }
   });
 
   pi.registerCommand("companion", {
-    description: "Read-only tutor chat for this project: ask, open, status, model, reset, auto.",
+    description: "Read-only tutor chat for this project: ask, open, new, close, snapshot, status, model, reset, auto.",
     handler: async (args, ctx) => handleCompanion(pi, ctx, args),
   });
 }

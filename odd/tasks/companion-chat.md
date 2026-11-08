@@ -28,7 +28,7 @@ S10. `/companion open` starts the same tutor as a real interactive Pi session in
 
 S11. Pane mode must not be limited by the length of a shell command. The role body travels as a launcher script written into the project's companion state directory, not as an inline argument, because the inline form is near the canonical shell command limit on macOS even though it works on Linux. The launcher is removed when the pane closes or reused in place, never left as a growing pile of scripts.
 
-S12. A new interactive session must not start without a companion beside it: "soprattutto quando si avvia una nuova sessione agents allora ci deve essere sempre a fianco una sessione companion quindi questa è una direttiva da implementare". Auto-open is therefore the default when the session is interactive and inside Herdr, and it must be defensible: the companion session it launches must never open a companion of its own, a headless or non-interactive run must never split a pane, and one setting turns it off.
+S12. A companion pane is available for every interactive Herdr session, but it must not open automatically by default. The operator explicitly chooses `/companion open` or `/companion auto on`; explicit auto-open remains defensible: the companion session it launches must never open a companion of its own, a headless or non-interactive run must never split a pane, and one setting controls the opt-in behavior.
 
 S13. The interface and the feature set improve from evidence, not from taste: "prova anche online a ricercare con la mia suite data search se esiste qualcosa per migliorare il companion sia graficamente che con interfaccia e sia in funzionalità". Findings are ranked by what Pi can actually support today, with the source for each.
 
@@ -42,13 +42,21 @@ S17. Dispatch input collapses whitespace and newlines to single spaces, trims th
 
 S18. `/companion send <text>` reuses the same validation, confirmation, and `herdr pane run` path as `dispatch_directive`. The README and companion role describe the one-line rule, human gate, and operator-controlled handoff.
 
-S19. The tutor must be able to consult what the MCP servers know, not only the files: "senza codemode né tool_search gli MCP server (codegraph, context7, engram, browseros, firecrawl) sono irraggiungibili". The pane therefore carries `tool_search` beside the read-only tools, which silences the unreachable-MCP warning without granting arbitrary script execution; `codemode` stays out, and the role tells the tutor that a search may surface MCP tools which write and that those stay out of contract.
+S19. The pane companion must remain hard read-only. It exposes repository read tools and the bounded `host_snapshot` tool, but not `tool_search`, MCP discovery, or `codemode`, because model instructions cannot enforce a no-write boundary for tools that can publish or mutate state. MCP investigation remains a working-chat responsibility.
 
 S20. A workflow worker pane must never open a companion of its own. `@piewf/herdr` launches every worker as a full interactive TUI session (`@piewf/herdr/dist/index.js:289` prefixes the environment onto the command it runs) and marks it only through `PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1`, never through `GENTLE_PI_AGENTS_CHILD`, so the delegated-child check alone misses it and the worker's `autoOpenDecision` came back eligible. Auto-open therefore stands down for that marker too, which the README already promised.
 
 S21. The companion pane carries its own one-line footer badge, published through `ctx.ui.setStatus("companion", ...)` so the built-in footer is never replaced: `tutor <idle|working> | <provider>/<model>:<effort> | <tokens> ctx | <n> entries`, in `dim` when idle and `accent` while a turn runs, refreshed on `session_start`, `turn_start` and `turn_end`. It exceeds 80 columns only when the pane allows it: the string is cut to the budget in code points with a trailing `...`. It appears in a companion session only, because `ctx.getContextUsage()` reports the calling session's tokens and a badge in the operator's pane would show someone else's number. Superseded by S22.
 
 S22. The usage line lives in a widget band below the editor, not in the footer badge: Pi 1.5.0 has only `aboveEditor` and `belowEditor` placements, so a right-aligned band is the reachable approximation of the operator's columns. The band is registered as `ctx.ui.setWidget("companion-usage", factory, { placement: "belowEditor" })` and renders the single line S21 describes, extended with the context window and its percent (`<tokens>/<window> (<percent>%) ctx`, tokens-only when the percent is unknown), right-aligned by padding to the rendered width, in `dim` when idle and `accent` while a turn runs. Below 40 columns the model segment is dropped rather than overflowing. The `setStatus` publishing path is gone: one pane shows those numbers once. It still appears in a companion session only.
+
+S23. Automatic pane opening is opt-in: missing companion settings mean `autoOpen: false`; `/companion auto on|off` remains explicit and does not affect manual commands.
+
+S24. `/companion open` is idempotent for the scoped canonical companion: it reuses a live matching pane instead of splitting another one. `/companion new` explicitly creates a temporary companion with a fresh transcript, and `/companion close` closes only the recorded companion pane without deleting transcript history.
+
+S25. Pane launchers pass the canonical companion session path explicitly to Pi, so the interactive pane and in-process tutor use the same persistent transcript. Temporary companions receive separate session paths.
+
+S26. `/companion snapshot` returns a bounded, redacted, on-demand snapshot of the host session for follow-up: session identity, project root/key, current model, latest bounded user/assistant context, recent tool summary, pending session entries, and freshness. It never dumps environment variables, credentials, or unrestricted screen history.
 
 ## Tasks
 
@@ -65,11 +73,16 @@ S22. The usage line lives in a widget band below the editor, not in the footer b
 | T9 | Auto-open a companion pane when an interactive session starts, with no recursion and an off switch | builder | S12 | this branch |
 | T10 | Online research on how other tools present a side chat, and what is worth adopting | researcher | S13 | this branch |
 | T11 | Gated caller-pane dispatch through the launcher, tool, and `/companion send` | builder | S14-S18 | this branch |
-| T12 | Reach the MCP servers from the companion through `tool_search`, with `codemode` still off | inline | S19 | this branch |
+| T12 | Keep MCP discovery and arbitrary script execution out of the pane companion | inline | S19 | this branch |
 | T13 | Stand down auto-open for workflow worker panes through the `@piewf/herdr` environment marker | inline | S20 | this branch |
 | T14 | Footer badge for the companion pane: tutor state, model, context tokens, transcript size | developer | S21 | this branch |
 | T15 | Specialist-sidebar answer rule so hyper-specialistic detail leaves the main pass | developer | S2 | this branch |
 | T16 | Right-aligned usage band below the editor, replacing the footer badge | developer | S22 | this branch |
+| T17 | Make auto-open opt-in and update lifecycle documentation | inline | S12 S23 | 771d195 |
+| T18 | Add idempotent `open`, explicit `new`, and explicit `close` lifecycle | inline | S24 | 771d195 |
+| T19 | Pass explicit persistent or temporary session paths to launchers | inline | S25 | 771d195 |
+| T20 | Add bounded on-demand host snapshot and follow-up command | inline | S26 | 771d195 |
+| T21 | Test, audit, package, install, release, and publish the lifecycle feature | inline | S23-S26 | 771d195 |
 
 ## Research: what to steal from the field (S13)
 
@@ -116,3 +129,9 @@ L13. Answer contract, from researched style evidence rather than taste: lead wit
 L14. Operator request (verbatim): "Implement a feature in the repo /root/git/personale/pi-companion ... FEATURE: a gated dispatch bridge, so a companion pane can hand the caller pane a directive instead of the operator copy-pasting it." The implementation preserves the read-only companion tools, adds a confirmation gate, normalizes to one line, and caps directives at 1,000 characters.
 
 L15. Operator request (verbatim): "Aggiungi in extensions/companion.ts la guardia per saltare l'auto-open del companion quando sono presenti marker di workflow o sottoagenti come PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER" ... "Quando un workflow esegue un task tramite @piewf/herdr, il processo secondario viene avviato in un riquadro Herdr interattivo con TUI attivo. Tale ambiente non imposta GENTLE_PI_AGENTS_CHILD, ma valorizza variabili specifiche come PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=\"1\"" ... "Di conseguenza autoOpenDecision restituisce esito positivo e genera un riquadro companion ridondante anche per il worker del workflow." Verified in the source: the marker is prefixed onto the command run in the created pane, so the worker session carries it. The README already stated this behaviour, so the defect was documentation ahead of code.
+
+L16. Operator request (verbatim): "perfetto rpocedi con la roadmap dis viluppo fai etst audit installa e pusha nuoav evriosjne e commit". The authorized implementation covers opt-in auto-open, explicit companion lifecycle, aligned session paths, bounded host snapshot, verification, release, commit, and push.
+
+L17. Audit correction: `tool_search` is not exposed in the pane companion because its discovered MCP tools can write, sync, or publish and the role prompt cannot enforce a hard read-only guarantee. The bounded `host_snapshot` tool is the safe follow-up channel.
+
+L18. Verification and release evidence for T17-T21: `npm test` passed 53/53, `npm run typecheck` passed, `git diff --check` passed, the strict read-only audit verdict was SHIP, `npm pack --dry-run` produced `pi-companion-0.5.0.tgz`, and a clean temporary Bun install loaded `pi-companion@0.5.0`. Commit: `771d195`.
