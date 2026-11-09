@@ -378,6 +378,140 @@ test("approved dispatch collapses newlines and runs herdr once for the caller pa
   }
 });
 
+test("dispatch normalizes the reason before rendering the confirmation", async () => {
+  const herdr = fakeHerdr();
+  try {
+    await withEnv(
+      {
+        PI_COMPANION_SESSION: "1",
+        PI_COMPANION_CALLER_PANE: "w7F:p1",
+        HERDR_TEST_LOG: herdr.log,
+        PATH: `${herdr.dir}:${process.env.PATH}`,
+      },
+      async () => {
+        const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+        let confirmMessage = "";
+        const reason = `  The\u001b[31m operator\u001b[0m asked\n\nfor\t${"x".repeat(320)}  `;
+        const result = await tool.execute(
+          "call-reason",
+          { prompt: "inspect the queue", reason },
+          undefined,
+          undefined,
+          {
+            hasUI: true,
+            ui: {
+              confirm: async (_title, message) => {
+                confirmMessage = message;
+                return false;
+              },
+            },
+          },
+        );
+        assert.equal(result.isError, true);
+        assert.doesNotMatch(confirmMessage, /[\u001b\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
+        const reasonLine = confirmMessage.split("\n\n").find((line) => line.startsWith("Reason: "));
+        assert.match(reasonLine, /^Reason: The operator asked for x/);
+        assert.equal(reasonLine.length, "Reason: ".length + 300);
+        assert.match(reasonLine, /\.\.\.$/);
+      },
+    );
+  } finally {
+    rmSync(herdr.dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch bounds oversized control-heavy reasons before cleaning", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+    let confirmMessage = "";
+    await tool.execute(
+      "call-reason-oversized",
+      { prompt: "inspect the queue", reason: `${"\u0000".repeat(10000)}after-bound` },
+      undefined,
+      undefined,
+      { hasUI: true, ui: { confirm: async (_title, message) => ((confirmMessage = message), false) } },
+    );
+    assert.match(confirmMessage, /Reason: No reason supplied\./);
+  });
+});
+
+test("dispatch truncates long reasons without splitting a surrogate pair", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+    let confirmMessage = "";
+    await tool.execute(
+      "call-reason-emoji",
+      { prompt: "inspect the queue", reason: `${"x".repeat(296)}\u{1f600}${"tail".repeat(10)}` },
+      undefined,
+      undefined,
+      { hasUI: true, ui: { confirm: async (_title, message) => ((confirmMessage = message), false) } },
+    );
+    const reasonLine = confirmMessage.split("\n\n").find((line) => line.startsWith("Reason: "));
+    assert.match(reasonLine, /^Reason: x+\.\.\.$/u);
+    assert.ok(reasonLine.length <= "Reason: ".length + 300);
+    assert.doesNotMatch(reasonLine, /[\uD800-\uDFFF]/u);
+  });
+});
+
+test("dispatch removes terminated ANSI sequences and bidi controls from confirmation reasons", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+    let confirmMessage = "";
+    await tool.execute(
+      "call-reason-controls",
+      {
+        prompt: "inspect the queue",
+        reason:
+          "safe\u001b]8;;https://example.test\u001b\\VISIBLE\u001b]8;;\u0007 next \u009d8;;https://example.test\u009cC1-VISIBLE" +
+          " \u001bPdcs-secret\u001b\\DCS \u0090dcs-secret\u009cC1DCS" +
+          " \u001bXsos-secret\u001b\\SOS \u0098sos-secret\u009cC1SOS" +
+          " \u001b^pm-secret\u001b\\PM \u009epm-secret\u009cC1PM" +
+          " \u001b_apc-secret\u001b\\APC \u009fapc-secret\u009cC1APC \u202eevil\u202c",
+      },
+      undefined,
+      undefined,
+      { hasUI: true, ui: { confirm: async (_title, message) => ((confirmMessage = message), false) } },
+    );
+    assert.match(confirmMessage, /Reason: safeVISIBLE next C1-VISIBLE DCS C1DCS SOS C1SOS PM C1PM APC C1APC evil/);
+    assert.doesNotMatch(confirmMessage, /dcs-secret|sos-secret|pm-secret|apc-secret/);
+    assert.doesNotMatch(confirmMessage, /[\u001b\u0080-\u009f\u202a-\u202e\u2066-\u2069]/u);
+  });
+});
+
+test("dispatch keeps ordinary text after unterminated control sequences", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+    let confirmMessage = "";
+    await tool.execute(
+      "call-reason-unterminated",
+      { prompt: "inspect the queue", reason: "before \u001bPpayload and \u0090payload remain visible" },
+      undefined,
+      undefined,
+      { hasUI: true, ui: { confirm: async (_title, message) => ((confirmMessage = message), false) } },
+    );
+    assert.match(confirmMessage, /Reason: before payload and payload remain visible/);
+  });
+});
+
+test("dispatch rejects C1 and bidirectional control characters in the directive", async () => {
+  await withEnv({ PI_COMPANION_SESSION: "1", PI_COMPANION_CALLER_PANE: "w7F:p1" }, async () => {
+    const tool = registeredExtension().tools.find((entry) => entry.name === "dispatch_directive");
+    for (const prompt of ["inspect\u0085the queue", "inspect\u202ethe queue"]) {
+      let confirmed = false;
+      const result = await tool.execute(
+        "call-control",
+        { prompt, reason: "The operator asked for the next step." },
+        undefined,
+        undefined,
+        { hasUI: true, ui: { confirm: async () => (confirmed = true) } },
+      );
+      assert.equal(result.isError, true);
+      assert.match(toolText(result), /control characters/i);
+      assert.equal(confirmed, false);
+    }
+  });
+});
+
 test("declined dispatch sends nothing and returns a failed result", async () => {
   const herdr = fakeHerdr();
   try {
@@ -754,6 +888,99 @@ test("buildHostSnapshot redacts PEM, URL credentials, and JWT-shaped values befo
     ],
   });
   assert.equal(snapshot.latestUser, "https://[REDACTED]@example.test/path [REDACTED PEM] [REDACTED JWT]");
+});
+
+test("buildHostSnapshot redacts Basic authorization, AWS access keys, and arbitrary URI credentials", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-3",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Authorization: Basic dXNlcjpwYXNz AKIAABCDEFGHIJKLMNOP redis://user:secret@cache.example/0 amqp://guest:guest@broker.example",
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(
+    snapshot.latestUser,
+    "Authorization: [REDACTED] [REDACTED] redis://[REDACTED]@cache.example/0 amqp://[REDACTED]@broker.example",
+  );
+  assert.doesNotMatch(snapshot.latestUser, /dXNlcjpwYXNz|AKIA|secret|guest/);
+});
+
+test("buildHostSnapshot redacts credentials split across text blocks", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-4",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [{ type: "message", message: { role: "user", content: [
+      { type: "text", text: "Authorization: Basic " },
+      { type: "text", text: "dXNlcjpwYXNz" },
+    ] } }],
+  });
+  assert.equal(snapshot.latestUser, "Authorization: [REDACTED]");
+  assert.doesNotMatch(snapshot.latestUser, /dXNlcjpwYXNz/);
+});
+
+test("buildHostSnapshot bounds multi-block text before redaction", () => {
+  const content = Array.from({ length: 10 }, (_, index) => ({
+    type: "text",
+    text: `${index}:${"a".repeat(500)}`,
+  }));
+  content.push({ type: "text", text: "Authorization: Basic dXNlcjpwYXNz" });
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-5",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [{ type: "message", message: { role: "user", content } }],
+  });
+  assert.ok(snapshot.latestUser.length <= 600);
+  assert.match(snapshot.latestUser, /\.\.\.$/);
+  assert.doesNotMatch(snapshot.latestUser, /dXNlcjpwYXNz/);
+});
+
+test("buildHostSnapshot bounds huge multi-block text while keeping credentials redacted", () => {
+  const content = [{ type: "text", text: "Authorization: Basic dXNlcjpwYXNz" }];
+  for (let index = 0; index < 200; index += 1) {
+    content.push({ type: "text", text: `${index}:${"a".repeat(500)}` });
+  }
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-7",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [{ type: "message", message: { role: "user", content } }],
+  });
+  assert.ok(snapshot.latestUser.length <= 600);
+  assert.match(snapshot.latestUser, /^Authorization: \[REDACTED\]/);
+  assert.doesNotMatch(snapshot.latestUser, /dXNlcjpwYXNz/);
+});
+
+test("buildHostSnapshot redacts a PEM block that ends beyond the snapshot input bound", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-6",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [{ type: "message", message: { role: "user", content: [
+      { type: "text", text: `prefix -----BEGIN PRIVATE KEY-----\n${"A".repeat(5000)}\n-----END PRIVATE KEY----- suffix` },
+    ] } }],
+  });
+  assert.match(snapshot.latestUser, /^prefix \[REDACTED PEM\]/);
+  assert.ok(snapshot.latestUser.length <= 600);
+  assert.doesNotMatch(snapshot.latestUser, /A{100,}|BEGIN PRIVATE KEY|END PRIVATE KEY/);
 });
 
 test("writeHostSnapshot / readHostSnapshot round-trips atomically", async () => {

@@ -30,6 +30,8 @@ export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 const COMPANION_PANE_TOOLS = [...READ_ONLY_TOOLS, "dispatch_directive", "host_snapshot"] as const;
 export const FALLBACK_MODEL = "cliproxyapi/gemini-3.8-flash-high:medium";
 export const MAX_DIRECTIVE_LENGTH = 1000;
+const MAX_REASON_LENGTH = 300;
+const MAX_REASON_INPUT = 4096;
 const COMPANION_PANE_NAME = "companion";
 const DISPATCH_PARAMETERS = {
   type: "object",
@@ -513,7 +515,7 @@ function dispatchFailure(message: string): DispatchResult {
 
 function normalizeDirective(prompt: unknown): string {
   if (typeof prompt !== "string") throw new Error("prompt must be a string");
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(prompt)) {
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(prompt)) {
     throw new Error("prompt contains control characters");
   }
   const normalized = prompt.replace(/\s+/gu, " ").trim();
@@ -522,6 +524,25 @@ function normalizeDirective(prompt: unknown): string {
     throw new Error(`prompt exceeds the ${MAX_DIRECTIVE_LENGTH}-character limit`);
   }
   return normalized;
+}
+
+const ANSI_SEQUENCE =
+  /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)|[PX^_][^\u001b\u009c]*(?:\u001b\\|\u009c)|[@-_])|\u009b[0-?]*[ -/]*[@-~]|\u009d[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)|[\u0090\u0098\u009e\u009f][^\u001b\u009c]*(?:\u001b\\|\u009c)/gu;
+
+function normalizeReason(reason: unknown): string {
+  if (typeof reason !== "string") return "No reason supplied.";
+  const cleaned = reason
+    .slice(0, MAX_REASON_INPUT)
+    .replace(ANSI_SEQUENCE, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!cleaned) return "No reason supplied.";
+  if (cleaned.length <= MAX_REASON_LENGTH) return cleaned;
+  let cut = MAX_REASON_LENGTH - 3;
+  const last = cleaned.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  return `${cleaned.slice(0, cut)}...`;
 }
 
 async function dispatchDirective(
@@ -540,7 +561,7 @@ async function dispatchDirective(
     return dispatchFailure(`Dispatch rejected: ${errorLine(error)}.`);
   }
 
-  const why = typeof reason === "string" && reason.trim() ? reason.trim() : "No reason supplied.";
+  const why = normalizeReason(reason);
   const approved = await ctx.ui.confirm(
     "Send directive to caller pane?",
     `This types into pane ${callerPaneId} and starts that agent working.\n\nReason: ${why}\n\nDirective: ${normalized}`,
@@ -1129,27 +1150,33 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
+const MAX_SNAPSHOT_INPUT = 4096;
+const MAX_CONTENT_SCAN = 64 * 1024;
+
 function boundedSnapshotText(value: string, limit = 600): string {
   const redacted = value
     .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/giu, "[REDACTED PEM]")
-    .replace(/\b(?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s/@]+(?::[^\s/@]*)?@/giu, (match) => `${match.slice(0, match.indexOf("://") + 3)}[REDACTED]@`)
-    .replace(/((?:"?(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|cookie|set-cookie)"?)\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[REDACTED]")
+    .slice(0, MAX_SNAPSHOT_INPUT)
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]*@/giu, (match) => `${match.slice(0, match.indexOf("://") + 3)}[REDACTED]@`)
+    .replace(/((?:"?(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|cookie|set-cookie)"?)\s*[:=]\s*)(?:Bearer\s+|Basic\s+)?(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[REDACTED]")
     .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/gu, "[REDACTED]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16})\b/gu, "[REDACTED]")
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[REDACTED JWT]");
   const normalized = redacted.replace(/\s+/gu, " ").trim();
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
 }
 
 function contentText(content: unknown): string | undefined {
-  if (typeof content === "string") return boundedSnapshotText(content);
+  if (typeof content === "string") return content.slice(0, MAX_CONTENT_SCAN);
   if (!Array.isArray(content)) return undefined;
   let text = "";
   for (const block of content) {
     const value = recordValue(block);
     if (value?.type !== "text" || typeof value.text !== "string") continue;
-    text = boundedSnapshotText(`${text} ${value.text}`);
-    if (text.length >= 600) break;
+    const remaining = MAX_CONTENT_SCAN - text.length;
+    if (remaining <= 0) break;
+    if (text) text += " ";
+    text += value.text.slice(0, MAX_CONTENT_SCAN - text.length);
   }
   return text || undefined;
 }
