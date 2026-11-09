@@ -71,6 +71,25 @@ function registeredExtension(values) {
   return { tools, commands };
 }
 
+function registeredExtensionWithEvents() {
+  const events = new Map();
+  const commands = new Map();
+  const messages = [];
+  const extension = companionExtension({
+    on(name, handler) {
+      events.set(name, handler);
+    },
+    sendMessage(message) {
+      messages.push(message);
+    },
+    registerCommand(name, command) {
+      commands.set(name, command);
+    },
+    registerTool() {},
+  });
+  return { extension, events, commands, messages };
+}
+
 function fakeHerdr() {
   const dir = mkdtempSync(join(tmpdir(), "companion-herdr-"));
   const log = join(dir, "calls.log");
@@ -678,7 +697,8 @@ test("buildHostSnapshot returns bounded follow-up context without environment da
   });
 
   assert.deepEqual(snapshot, {
-    version: 1,
+    version: 2,
+    source: "explicit",
     capturedAt: "2026-11-08T10:11:12.123Z",
     sessionId: "sid-1",
     cwd: "/root/project",
@@ -691,6 +711,8 @@ test("buildHostSnapshot returns bounded follow-up context without environment da
     latestAssistant: "The queue is healthy.",
     recentTools: ["read"],
   });
+  assert.match(formatHostSnapshot(snapshot), /companion resume capsule/);
+  assert.match(formatHostSnapshot(snapshot), /source: explicit/);
   assert.match(formatHostSnapshot(snapshot), /latest assistant: The queue is healthy\./);
   assert.doesNotMatch(formatHostSnapshot(snapshot), /do-not-copy/);
 });
@@ -715,6 +737,25 @@ test("buildHostSnapshot redacts credential-like values", () => {
   assert.doesNotMatch(snapshot.latestUser, /secret-value|bearer-value|hunter2|sk-123/);
 });
 
+test("buildHostSnapshot redacts PEM, URL credentials, and JWT-shaped values before normalization", () => {
+  const snapshot = buildHostSnapshot({
+    sessionId: "sid-secret-2",
+    cwd: "/root/project",
+    projectKey: "abc123",
+    phase: "idle",
+    entries: [
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "https://alice:secret@example.test/path -----BEGIN PRIVATE KEY----- secret -----END PRIVATE KEY----- eyJheader.payload.signature" }],
+        },
+      },
+    ],
+  });
+  assert.equal(snapshot.latestUser, "https://[REDACTED]@example.test/path [REDACTED PEM] [REDACTED JWT]");
+});
+
 test("writeHostSnapshot / readHostSnapshot round-trips atomically", async () => {
   const dir = mkdtempSync(join(tmpdir(), "companion-snapshot-"));
   const path = join(dir, "host-snapshot.json");
@@ -732,6 +773,56 @@ test("writeHostSnapshot / readHostSnapshot round-trips atomically", async () => 
     assert.equal(existsSync(`${path}.${process.pid}.tmp`), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reset refuses to archive a transcript while the record says the pane is active", async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "companion-reset-"));
+  const projectRoot = mkdtempSync(join(tmpdir(), "companion-reset-project-"));
+  try {
+    await withEnv({ PI_CODING_AGENT_DIR: agentDir }, async () => {
+      const paths = companionPaths(agentDir, projectRoot);
+      mkdirSync(paths.dir, { recursive: true });
+      writeFileSync(paths.sessionPath, "session\n");
+      writeOpenRecord(paths.openRecordPath, {
+        sessionId: "sid-active",
+        paneId: "pane-active",
+        timestamp: "2026-11-08T10:11:12.123Z",
+        state: "open",
+      });
+      const registered = registeredExtensionWithEvents();
+      await registered.commands.get("companion").handler("reset", { cwd: projectRoot, hasUI: true });
+      assert.equal(existsSync(paths.sessionPath), true);
+      assert.match(registered.messages.at(-1).content, /close the active pane/);
+    });
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("host snapshot is published only by the explicit snapshot command", async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "companion-on-demand-"));
+  try {
+    await withEnv({ PI_CODING_AGENT_DIR: agentDir, PI_COMPANION_SESSION: undefined }, async () => {
+      const registered = registeredExtensionWithEvents();
+      const context = {
+        cwd: agentDir,
+        hasUI: true,
+        mode: "tui",
+        isIdle: () => true,
+        sessionManager: {
+          getSessionId: () => "sid-on-demand",
+          getEntries: () => [{ type: "message", message: { role: "user", content: "inspect this" } }],
+        },
+      };
+      await registered.events.get("turn_end")({}, context);
+      assert.equal(existsSync(companionPaths(agentDir, agentDir).snapshotPath), false);
+      await registered.commands.get("companion").handler("snapshot", context);
+      assert.equal(readHostSnapshot(companionPaths(agentDir, agentDir).snapshotPath)?.sessionId, "sid-on-demand");
+    });
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
   }
 });
 

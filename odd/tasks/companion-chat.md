@@ -58,6 +58,12 @@ S25. Pane launchers pass the canonical companion session path explicitly to Pi, 
 
 S26. `/companion snapshot` returns a bounded, redacted, on-demand snapshot of the host session for follow-up: session identity, project root/key, current model, latest bounded user/assistant context, recent tool summary, pending session entries, and freshness. It never dumps environment variables, credentials, or unrestricted screen history.
 
+S27. Snapshot state is not written automatically on every host turn. It is created only by an explicit `/companion snapshot` request, uses a deny-by-default redaction policy for credential-shaped values, and remains unavailable until requested.
+
+S28. Companion lifecycle operations fail closed around stale pane records, active pane ownership, transcript reset, and lock recovery. A recorded pane must match the current workspace and companion identity before it can be reused or closed.
+
+S29. The companion exposes a small, versioned resume capsule derived from the explicit snapshot without copying the full host transcript. The capsule includes freshness and provenance and remains a hint that the companion must verify against source.
+
 ## Tasks
 
 | ID | What | Route | Spec | Commit |
@@ -83,6 +89,14 @@ S26. `/companion snapshot` returns a bounded, redacted, on-demand snapshot of th
 | T19 | Pass explicit persistent or temporary session paths to launchers | inline | S25 | 771d195 |
 | T20 | Add bounded on-demand host snapshot and follow-up command | inline | S26 | 771d195 |
 | T21 | Test, audit, package, install, release, and publish the lifecycle feature | inline | S23-S26 | 771d195 |
+| T22 | Harden snapshot privacy and make host snapshot publication explicitly on-demand | inline | S26-S27 | a7d4a95 |
+| T23 | Harden pane identity, transcript reset, and lifecycle lock failure modes | inline | S24 S28 | a7d4a95 |
+| T24 | Add a versioned privacy-safe resume capsule contract | inline | S26 S29 | a7d4a95 |
+
+## Delivery
+
+- Strategy: `auto-chain`, because the feature branch is already over the 400-authored-line review budget; the current candidate is the isolated work-unit commit `a7d4a95`.
+- Slice boundary: `771d195` contains T17-T21; `a7d4a95` contains T22-T24 and is the security-audit candidate.
 
 ## Research: what to steal from the field (S13)
 
@@ -135,3 +149,7 @@ L16. Operator request (verbatim): "perfetto rpocedi con la roadmap dis viluppo f
 L17. Audit correction: `tool_search` is not exposed in the pane companion because its discovered MCP tools can write, sync, or publish and the role prompt cannot enforce a hard read-only guarantee. The bounded `host_snapshot` tool is the safe follow-up channel.
 
 L18. Verification and release evidence for T17-T21: `npm test` passed 53/53, `npm run typecheck` passed, `git diff --check` passed, the strict read-only audit verdict was SHIP, `npm pack --dry-run` produced `pi-companion-0.5.0.tgz`, and a clean temporary Bun install loaded `pi-companion@0.5.0`. Commit: `771d195`.
+
+L19. Operator request (verbatim): "Procedi prima cn moemntazioneed evoluzne della comapnin e dopo audit che n clauflare skills e strix". The implementation scope is the first evidence-driven slice: snapshot privacy/on-demand behavior, lifecycle hardening, and a small versioned resume capsule. The Cloudflare and Strix audit follows the new candidate.
+
+L20. Deep-research decision: keep the opt-in persistent pane, add explicit on-demand resume state before contextual sidecar or RPC multi-tab work, and measure resumption instead of making auto-open mandatory.

@@ -436,9 +436,15 @@ export function readMeta(path: string): CompanionMeta | undefined {
   };
 }
 
+function writeJsonAtomic(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, path);
+}
+
 function writeMeta(path: string, meta: CompanionMeta): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+  writeJsonAtomic(path, meta);
 }
 
 function ensureMeta(paths: CompanionPaths, root: string): CompanionMeta {
@@ -731,30 +737,18 @@ function acquireOpenLock(lockPath: string): boolean {
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    try {
-      const owner = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
-      if (Number.isInteger(owner) && owner > 0) {
-        try {
-          process.kill(owner, 0);
-          return false;
-        } catch (probeError) {
-          if ((probeError as NodeJS.ErrnoException).code !== "ESRCH") return false;
-        }
-        unlinkSync(lockPath);
-        return acquireOpenLock(lockPath);
-      }
-    } catch {
-      // An unreadable lock is treated as owned; fail closed rather than racing it.
-    }
+    // Never reclaim a stale lock automatically: unlink-and-retry lets two Pi
+    // processes both pass the lifecycle guard after observing the same owner.
     return false;
   }
 }
 
 function releaseOpenLock(lockPath: string): void {
   try {
-    unlinkSync(lockPath);
+    const owner = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+    if (owner === process.pid) unlinkSync(lockPath);
   } catch {
-    // The lock may have been reclaimed after a stale process died.
+    // The lock may already be absent or unreadable; never remove another owner's lock.
   }
 }
 
@@ -799,11 +793,16 @@ async function findLiveCompanionPane(
   const workspaceId = jsonField(layout, "result", "layout", "workspace_id") as string | undefined;
   if (!workspaceId) throw new Error("herdr pane layout returned invalid JSON");
   const record = readOpenRecord(state.paths.openRecordPath);
-  const paneIds = new Set(panes.map((pane) => pane.pane_id));
+  const recordedPane = record ? panes.find((pane) => pane.pane_id === record.paneId) : undefined;
+  if (recordedPane) {
+    if (!isCompanionPane(recordedPane, workspaceId, state.root)) {
+      throw new Error(`recorded companion pane ${recordedPane.pane_id} does not match the current workspace or companion identity`);
+    }
+    return { paneId: recordedPane.pane_id, workspaceId, panes };
+  }
   if (record) {
-    if (paneIds.has(record.paneId)) return { paneId: record.paneId, workspaceId, panes };
     const probe = await paneProbe(record.paneId);
-    if (probe === "live") return { paneId: record.paneId, workspaceId, panes };
+    if (probe === "live") throw new Error(`recorded companion pane ${record.paneId} is live but not visible in the current workspace`);
     if (probe === "unknown") throw new Error(`cannot determine whether companion pane ${record.paneId} is alive`);
   }
   const fallback = options.allowFallback === false
@@ -1087,8 +1086,7 @@ function setCompanionModel(pi: ExtensionAPI, ctx: ExtensionCommandContext, value
 function setCompanionAutoOpen(pi: ExtensionAPI, ctx: ExtensionCommandContext, enabled: boolean): void {
   const path = companionSettingsPath(extensionAgentDir());
   const settings = readJsonObject(path) ?? {};
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify({ ...settings, autoOpen: enabled }, null, 2)}\n`, "utf8");
+  writeJsonAtomic(path, { ...settings, autoOpen: enabled });
   post(pi, ctx, `companion auto-open: ${enabled ? "on" : "off"}`);
 }
 
@@ -1096,6 +1094,11 @@ function resetCompanion(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   const agentDir = extensionAgentDir();
   const root = resolveProjectRoot(ctx.cwd);
   const paths = companionPaths(agentDir, root);
+  const record = readOpenRecord(paths.openRecordPath);
+  if (record?.state === "open") {
+    post(pi, ctx, "companion: close the active pane before resetting its transcript");
+    return;
+  }
   if (!existsSync(paths.sessionPath)) {
     post(pi, ctx, `companion: no transcript to archive at ${paths.sessionPath}`);
     return;
@@ -1107,7 +1110,8 @@ function resetCompanion(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
 }
 
 export type HostSnapshot = {
-  version: 1;
+  version: 2;
+  source: "explicit";
   capturedAt: string;
   sessionId: string;
   cwd: string;
@@ -1126,12 +1130,14 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 }
 
 function boundedSnapshotText(value: string, limit = 600): string {
-  const normalized = value
-    .replace(/\s+/gu, " ")
-    .trim()
-    .replace(/((?:"?(?:api[_-]?key|token|secret|password|passwd|authorization)"?)\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[REDACTED]")
+  const redacted = value
+    .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/giu, "[REDACTED PEM]")
+    .replace(/\b(?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s/@]+(?::[^\s/@]*)?@/giu, (match) => `${match.slice(0, match.indexOf("://") + 3)}[REDACTED]@`)
+    .replace(/((?:"?(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|cookie|set-cookie)"?)\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[REDACTED]")
     .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/gu, "[REDACTED]");
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/gu, "[REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[REDACTED JWT]");
+  const normalized = redacted.replace(/\s+/gu, " ").trim();
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
 }
 
@@ -1182,13 +1188,17 @@ export function buildHostSnapshot(input: {
             : value?.type === "tool_use" && typeof value.name === "string"
               ? value.name
               : undefined;
-        if (name && recentTools[recentTools.length - 1] !== name && recentTools.length < 10) recentTools.push(name);
+        if (name && recentTools[recentTools.length - 1] !== name) {
+          recentTools.push(name);
+          if (recentTools.length > 50) recentTools.shift();
+        }
       }
     }
   }
 
   return {
-    version: 1,
+    version: 2,
+    source: "explicit",
     capturedAt: input.capturedAt ?? new Date().toISOString(),
     sessionId: input.sessionId,
     cwd: input.cwd,
@@ -1205,8 +1215,9 @@ export function buildHostSnapshot(input: {
 
 export function formatHostSnapshot(snapshot: HostSnapshot): string {
   return [
-    "companion snapshot",
+    "companion resume capsule",
     `captured: ${snapshot.capturedAt}`,
+    `source: ${snapshot.source}`,
     `session: ${snapshot.sessionId}`,
     `project: ${snapshot.cwd} (${snapshot.projectKey})`,
     `phase: ${snapshot.phase}`,
@@ -1227,7 +1238,7 @@ export function writeHostSnapshot(path: string, snapshot: HostSnapshot): void {
 
 export function readHostSnapshot(path: string): HostSnapshot | undefined {
   const raw = readJsonObject(path);
-  if (!raw || raw.version !== 1 || typeof raw.capturedAt !== "string" || typeof raw.sessionId !== "string") {
+  if (!raw || (raw.version !== 1 && raw.version !== 2) || typeof raw.capturedAt !== "string" || typeof raw.sessionId !== "string") {
     return undefined;
   }
   if (typeof raw.cwd !== "string" || typeof raw.projectKey !== "string") return undefined;
@@ -1237,7 +1248,8 @@ export function readHostSnapshot(path: string): HostSnapshot | undefined {
     ? raw.recentTools.filter((value): value is string => typeof value === "string").slice(-5)
     : [];
   return {
-    version: 1,
+    version: 2,
+    source: "explicit",
     capturedAt: raw.capturedAt,
     sessionId: raw.sessionId,
     cwd: raw.cwd,
@@ -1462,16 +1474,13 @@ export default function companionExtension(pi: ExtensionAPI): void {
 
   pi.on("turn_start", (_event, ctx) => {
     publishCompanionUsage(ctx, "working");
-    publishHostSnapshot(ctx, "working");
   });
   pi.on("turn_end", (_event, ctx) => {
     publishCompanionUsage(ctx, "idle");
-    publishHostSnapshot(ctx, "idle");
   });
 
   pi.on("session_start", async (_event, ctx) => {
     publishCompanionUsage(ctx, "idle");
-    publishHostSnapshot(ctx, "idle");
     const interactive =
       ctx.hasUI && ctx.mode === "tui" && process.env.GENTLE_PI_AGENTS_CHILD !== "1";
     const companionMarker = process.env[COMPANION_MARKER] === "1";

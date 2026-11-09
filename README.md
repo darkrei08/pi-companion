@@ -73,7 +73,7 @@ immediately recreate it. A later explicit `/companion open` can open it again.
 | `/companion status` | Model, lifecycle, pane, transcript path, entries, bytes, project key |
 | `/companion model <alias\|provider/model[:effort]>` | Validate a model and pin it for this project |
 | `/companion send <prompt>` | Ask the companion to dispatch a confirmed directive to its caller pane |
-| `/companion reset` | Archive the current transcript and start clean |
+| `/companion reset` | Archive the current transcript and start clean; close the active tutor first |
 | `/companion auto on\|off` | Enable or disable automatic companion pane opening |
 
 ### `/companion open`
@@ -94,7 +94,7 @@ When the companion was launched from a caller pane, it also exposes `dispatch_di
 
 The pane companion does not expose MCP discovery or arbitrary script execution. This keeps the read-only boundary enforceable instead of relying on the model to avoid write-capable tools. The companion can still inspect the repository through `read`, `grep`, `find`, `ls`, and the bounded `host_snapshot` tool.
 
-`/companion snapshot` is deliberately bounded and on demand. It shows the host session id, project, phase, model, entry count, latest bounded user and assistant messages, and recent tool names. It does not dump environment variables, credentials, or unrestricted terminal history. The pane companion can request the same cached snapshot through its read-only `host_snapshot` tool.
+`/companion snapshot` is deliberately bounded and on demand. The host does not write snapshot state on every turn. The explicit command creates a versioned resume capsule with the host session id, project, phase, model, entry count, latest bounded user and assistant messages, recent tool names, freshness, and provenance. Credential-shaped values are redacted before normalization; the capsule does not dump environment variables, credentials, or unrestricted terminal history. The pane companion can request the same cached capsule through its read-only `host_snapshot` tool.
 
 ## Which chat for which prompt
 
